@@ -86,7 +86,31 @@ const unsigned long TIME_RALPH_WINDUP = 350; // Ralph levanta los brazos antes d
 // Área que se recompone alrededor de Felix (cabe su posición anterior y la nueva)
 const int ACTOR_BUF_W = 48;
 const int ACTOR_BUF_H = 64;
-const int FELIX_RECT_TOP = 24;  // Por encima del centro: sprite + indicador de martillo
+const int FELIX_RECT_TOP = 24;   // Por encima del centro: sprite + indicador de martillo
+const int FELIX_RECT_HALF = 14;  // A los lados y por debajo: sprite + borde del escudo
+
+// Objetos que aparecen en las ventanas
+const unsigned long TIME_POWERUP_SLOW = 5000;      // Rocas y pájaro a media velocidad
+const unsigned long TIME_PICKUP_LIFETIME = 8000;   // Desaparece si no se recoge
+const unsigned long TIME_PICKUP_MIN = 8000;        // Intervalo entre apariciones
+const unsigned long TIME_PICKUP_MAX = 14000;
+const float SLOW_FACTOR = 0.5;
+
+const int COMBO_MAX_MULT = 5;  // Multiplicador máximo por reparaciones seguidas sin golpe
+
+// Pájaro que cruza una fila del edificio
+const int BIRD_FIRST_STAGE = 3;
+const int BIRD_W = 16;
+const int BIRD_H = 12;
+const float BIRD_SPEED_BASE = 2.0;
+const float BIRD_SPEED_INC = 0.2;
+const float BIRD_SPEED_MAX = 4.5;
+const int BIRD_HIT_RANGE = 16;
+const unsigned long TIME_BIRD_MIN = 5000;
+const unsigned long TIME_BIRD_MAX = 9000;
+const unsigned long TIME_BIRD_FLAP = 150;
+const int BIRD_BUF_W = 40;
+const int BIRD_BUF_H = 16;
 
 // Paleta (RGB565)
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
@@ -196,10 +220,16 @@ TFT_eSprite sprWinFixed = TFT_eSprite(&tft);
 TFT_eSprite sprWinBroken = TFT_eSprite(&tft);
 TFT_eSprite sprWinFullyBroken = TFT_eSprite(&tft);
 TFT_eSprite sprHammer = TFT_eSprite(&tft);
+TFT_eSprite sprHeart = TFT_eSprite(&tft);
+TFT_eSprite sprClock = TFT_eSprite(&tft);
+TFT_eSprite sprShield = TFT_eSprite(&tft);
+// Pájaro: [0-1] mirando a la derecha, [2-3] a la izquierda; dos fotogramas de aleteo
+TFT_eSprite sprBird[4] = {TFT_eSprite(&tft), TFT_eSprite(&tft), TFT_eSprite(&tft), TFT_eSprite(&tft)};
 // Búferes de composición: cada zona se dibuja entera en RAM y se vuelca de una
 // vez, así nada se borra y repinta a la vista (sin parpadeo).
 TFT_eSprite sprColumn = TFT_eSprite(&tft);  // Una columna del edificio (rocas)
 TFT_eSprite sprActor = TFT_eSprite(&tft);   // Entorno de Felix (saltos entre ventanas)
+TFT_eSprite sprBirdBuf = TFT_eSprite(&tft); // Entorno del pájaro
 
 // ================= ESTRUCTURAS Y MODOS =================
 enum GameState { START, PLAYING, STAGE_CLEAR, GAMEOVER };
@@ -235,6 +265,21 @@ struct Rock {
   float y;
 };
 
+enum PickupType { PICKUP_NONE, PICKUP_HAMMER, PICKUP_HEART, PICKUP_SLOW, PICKUP_SHIELD };
+
+struct Pickup {
+  PickupType type;  // PICKUP_NONE = no hay ninguno en el edificio
+  int col, row;
+  unsigned long expires;
+};
+
+struct Bird {
+  bool active;
+  float x;   // Centro en pantalla
+  int row;
+  int dir;   // +1 hacia la derecha, -1 hacia la izquierda
+};
+
 // ================= VARIABLES DE ESTADO =================
 Window building[COLS][ROWS];
 PlayerFelix felix = {1, 3, 3, 0, 0, 0, 0, 0, 0, false};
@@ -258,10 +303,18 @@ unsigned long invincibilityEndTime = 0;
 unsigned long lastFlickerTime = 0;
 bool flickerVisible = true;
 
-bool hammerSpawned = false;
-int hammerCol = 0, hammerRow = 0;
+Pickup pickup = {PICKUP_NONE, 0, 0, 0};
+unsigned long nextPickupTime = 0;
 bool felixHasHammer = false;
 unsigned long hammerEndTime = 0;
+bool felixHasShield = false;
+unsigned long slowEndTime = 0;
+int combo = 0;  // Reparaciones seguidas sin recibir un golpe
+
+Bird bird = {false, 0, 0, 1};
+unsigned long nextBirdTime = 0;
+int birdDrawnX = 0;
+bool birdOnScreen = false;
 
 bool startScreenDrawn = false;
 bool newRecordThisGame = false;
@@ -288,6 +341,8 @@ void updateMenuOLED();
 void drawBuildingBase();
 void renderColumn(int c);
 void updateInvincibility(unsigned long now);
+int comboMultiplier();
+int birdY();
 void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h);
 
 // ================= GESTIÓN DE AUDIO =================
@@ -362,16 +417,18 @@ uint16_t artColor(char ch, uint16_t background) {
     case 'h': return COLOR_HAIR;
     case 'n': return COLOR_BOOT;
     case 'g': return COLOR_STEEL;
+    case 'c': return COLOR_GLASS;
     default:  return background;
   }
 }
 
-void buildArtSprite(TFT_eSprite &spr, const char *const *rows, int size, int scale, uint16_t background) {
-  spr.createSprite(size * scale, size * scale);
+void buildArtSprite(TFT_eSprite &spr, const char *const *rows, int w, int h, int scale,
+                    uint16_t background, bool mirror = false) {
+  spr.createSprite(w * scale, h * scale);
   spr.fillSprite(background);
-  for (int y = 0; y < size; y++) {
-    for (int x = 0; x < size; x++) {
-      uint16_t color = artColor(rows[y][x], background);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      uint16_t color = artColor(rows[y][mirror ? w - 1 - x : x], background);
       if (color != background) spr.fillRect(x * scale, y * scale, scale, scale, color);
     }
   }
@@ -445,6 +502,57 @@ const char *const ART_RALPH_THROW[16] = {
   "...kkkk..kkkk...",
 };
 
+const char *const ART_HEART[8] = {
+  ".rr..rr.",
+  "rrrrrrrr",
+  "rwrrrrrr",
+  "rrrrrrrr",
+  ".rrrrrr.",
+  "..rrrr..",
+  "...rr...",
+  "........",
+};
+
+const char *const ART_CLOCK[8] = {
+  "..kkkk..",
+  ".kwwwwk.",
+  "kwwkwwwk",
+  "kwwkwwwk",
+  "kwwkkwwk",
+  "kwwwwwwk",
+  ".kwwwwk.",
+  "..kkkk..",
+};
+
+const char *const ART_SHIELD[8] = {
+  "kkkkkkkk",
+  "kbbbbwbk",
+  "kbbbbwbk",
+  "kbbbbbbk",
+  "kbbbbbbk",
+  ".kbbbbk.",
+  "..kbbk..",
+  "...kk...",
+};
+
+const char *const ART_BIRD_UP[6] = {
+  ".gg.....",
+  "..ggg.g.",
+  "gggggkgy",
+  ".gggggg.",
+  "..gggg..",
+  "........",
+};
+
+const char *const ART_BIRD_DOWN[6] = {
+  "......g.",
+  "gggggkgy",
+  ".gggggg.",
+  "..gggg..",
+  ".ggg....",
+  ".gg.....",
+};
+
 // Marco, cristal, travesaños y alféizar comunes a los tres estados de ventana
 void drawWindowBase(TFT_eSprite &spr, uint16_t glass) {
   spr.createSprite(WIN_WIDTH, WIN_HEIGHT);
@@ -461,11 +569,19 @@ void drawWindowMullions(TFT_eSprite &spr) {
 
 void buildSprites() {
   // Felix se dibuja sobre el edificio: fondo magenta = transparente.
-  buildArtSprite(sprFelix, ART_FELIX, 12, 2, TFT_MAGENTA);
-  buildArtSprite(sprFelixFix, ART_FELIX_FIX, 12, 2, TFT_MAGENTA);
+  buildArtSprite(sprFelix, ART_FELIX, 12, 12, 2, TFT_MAGENTA);
+  buildArtSprite(sprFelixFix, ART_FELIX_FIX, 12, 12, 2, TFT_MAGENTA);
   // Ralph solo se dibuja sobre el cielo: sprite opaco, se pinta sin borrar antes.
-  buildArtSprite(sprRalph, ART_RALPH, 16, 2, COLOR_SKY);
-  buildArtSprite(sprRalphThrow, ART_RALPH_THROW, 16, 2, COLOR_SKY);
+  buildArtSprite(sprRalph, ART_RALPH, 16, 16, 2, COLOR_SKY);
+  buildArtSprite(sprRalphThrow, ART_RALPH_THROW, 16, 16, 2, COLOR_SKY);
+
+  buildArtSprite(sprHeart, ART_HEART, 8, 8, 2, TFT_MAGENTA);
+  buildArtSprite(sprClock, ART_CLOCK, 8, 8, 2, TFT_MAGENTA);
+  buildArtSprite(sprShield, ART_SHIELD, 8, 8, 2, TFT_MAGENTA);
+  buildArtSprite(sprBird[0], ART_BIRD_UP, 8, 6, 2, TFT_MAGENTA);
+  buildArtSprite(sprBird[1], ART_BIRD_DOWN, 8, 6, 2, TFT_MAGENTA);
+  buildArtSprite(sprBird[2], ART_BIRD_UP, 8, 6, 2, TFT_MAGENTA, true);
+  buildArtSprite(sprBird[3], ART_BIRD_DOWN, 8, 6, 2, TFT_MAGENTA, true);
 
   sprRock.createSprite(ROCK_SIZE, ROCK_SIZE);
   sprRock.fillSprite(TFT_MAGENTA);
@@ -509,7 +625,8 @@ void buildSprites() {
   sprHammer.fillRect(7, 8, 2, 7, TFT_WHITE);
 
   if (sprColumn.createSprite(WIN_WIDTH, BUILD_H) == nullptr ||
-      sprActor.createSprite(ACTOR_BUF_W, ACTOR_BUF_H) == nullptr) {
+      sprActor.createSprite(ACTOR_BUF_W, ACTOR_BUF_H) == nullptr ||
+      sprBirdBuf.createSprite(BIRD_BUF_W, BIRD_BUF_H) == nullptr) {
     Serial.println("Sin memoria para los buferes de composicion");
   }
 }
@@ -540,11 +657,53 @@ unsigned long ralphCooldown() {
   return TIME_COOLDOWN_RALPH - reduction;
 }
 
-void giveHammer() {
-  hammerSpawned = false;
-  felixHasHammer = true;
-  hammerEndTime = millis() + TIME_POWERUP_HAMMER;
+void schedulePickup(unsigned long now) {
+  nextPickupTime = now + random(TIME_PICKUP_MIN, TIME_PICKUP_MAX);
 }
+
+// Coloca un objeto al azar en una ventana donde no esté Felix
+void spawnPickup(unsigned long now) {
+  // El corazón solo sale si falta alguna vida
+  static const PickupType options[] = {PICKUP_HAMMER, PICKUP_SLOW, PICKUP_SHIELD, PICKUP_HEART};
+  pickup.type = options[random(felix.lives < 3 ? 4 : 3)];
+  if (pickup.type == PICKUP_SHIELD && felixHasShield) pickup.type = PICKUP_HAMMER;
+
+  do {
+    pickup.col = random(COLS);
+    pickup.row = random(ROWS);
+  } while (pickup.col == felix.col && pickup.row == felix.row);
+
+  pickup.expires = now + TIME_PICKUP_LIFETIME;
+  markDirty(pickup.col);
+}
+
+void collectPickup(unsigned long now) {
+  switch (pickup.type) {
+    case PICKUP_HAMMER:
+      felixHasHammer = true;
+      hammerEndTime = now + TIME_POWERUP_HAMMER;
+      break;
+    case PICKUP_HEART:
+      if (felix.lives < 3) felix.lives++;
+      updateLivesLEDs();
+      break;
+    case PICKUP_SLOW:
+      slowEndTime = now + TIME_POWERUP_SLOW;
+      break;
+    case PICKUP_SHIELD:
+      felixHasShield = true;
+      break;
+    case PICKUP_NONE:
+      return;
+  }
+  pickup.type = PICKUP_NONE;
+  markDirty(pickup.col);
+  felixDirty = true;
+  schedulePickup(now);
+  playSFX(NOTE_C5, 400);
+}
+
+bool slowActive(unsigned long now) { return now < slowEndTime; }
 
 void resetActors() {
   felix.col = 1; felix.row = 3;
@@ -566,9 +725,16 @@ void resetActors() {
   flickerVisible = true;
   felixHasHammer = false;
   hammerEndTime = 0;
+  slowEndTime = 0;  // El escudo y el combo sí se conservan entre etapas
+
+  pickup.type = PICKUP_NONE;
+  schedulePickup(millis());
+  bird.active = false;
+  birdOnScreen = false;
+  nextBirdTime = millis() + random(TIME_BIRD_MIN, TIME_BIRD_MAX);
 }
 
-// Genera ventanas rotas y martillo para la etapa actual
+// Genera las ventanas rotas de la etapa actual y, a veces, un objeto inicial
 void generateStage() {
   int brokenChance = PROB_BROKEN_BASE;
   int doubleBrokenChance = PROB_DBL_BROKEN_BASE;
@@ -595,18 +761,15 @@ void generateStage() {
     if (w.state == 0) { w.state = 1; broken++; }
   }
 
-  hammerSpawned = random(100) < hammerChance;
-  if (hammerSpawned) {
-    hammerCol = random(COLS);
-    hammerRow = random(ROWS);
-    if (felix.col == hammerCol && felix.row == hammerRow) giveHammer();
-  }
+  if (random(100) < hammerChance) spawnPickup(millis());
 }
 
 void initGame() {
   stage = 1;
   felix.lives = 3;
   felix.score = 0;
+  felixHasShield = false;
+  combo = 0;
   newRecordThisGame = false;
   resetActors();
   generateStage();
@@ -650,6 +813,8 @@ void beginGameOver() {
   gameOverStart = millis();
 }
 
+int comboMultiplier() { return min(combo + 1, COMBO_MAX_MULT); }
+
 // Termina la reparación en curso: aquí es cuando la ventana mejora de verdad
 void finishRepair() {
   felixFixing = false;
@@ -658,7 +823,8 @@ void finishRepair() {
   Window &w = building[felix.col][felix.row];
   if (w.state == 0) return;
   w.state--;
-  felix.score += (w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL;
+  felix.score += ((w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL) * comboMultiplier();
+  combo++;
   markDirty(felix.col);
   playSFX(NOTE_G4, 150);
   if (allWindowsFixed()) beginStageClear();
@@ -696,10 +862,8 @@ void handleFelixInput(const Inputs &in, bool fixPressed, unsigned long now) {
   felix.hopping = true;
   lastMoveTime = now;
 
-  if (hammerSpawned && felix.col == hammerCol && felix.row == hammerRow) {
-    giveHammer();
-    markDirty(hammerCol);
-    playSFX(NOTE_C5, 400);
+  if (pickup.type != PICKUP_NONE && felix.col == pickup.col && felix.row == pickup.row) {
+    collectPickup(now);
   }
 }
 
@@ -766,8 +930,9 @@ void handleRalph(const Inputs &in, unsigned long now) {
   if (cooldownReady) startThrow(now);
 }
 
-void updateRocks() {
+void updateRocks(unsigned long now) {
   float currentSpeed = min(ROCK_SPEED_BASE + stage * ROCK_SPEED_INC, ROCK_SPEED_MAX);
+  if (slowActive(now)) currentSpeed *= SLOW_FACTOR;
 
   for (int i = 0; i < MAX_ROCKS; i++) {
     if (!rocks[i].active) continue;
@@ -775,6 +940,56 @@ void updateRocks() {
     if (rocks[i].y > SCREEN_MAX_Y + ROCK_OFFSET) rocks[i].active = false;
     markDirty(rocks[i].col);
   }
+}
+
+// A partir de BIRD_FIRST_STAGE, un pájaro cruza de vez en cuando una fila
+// entera: obliga a cambiar de fila, no solo de columna.
+void updateBird(unsigned long now) {
+  if (!bird.active) {
+    if (stage < BIRD_FIRST_STAGE || now < nextBirdTime) return;
+    bird.active = true;
+    bird.row = random(ROWS);
+    bird.dir = random(2) ? 1 : -1;
+    bird.x = (bird.dir > 0) ? BUILD_X - BIRD_W / 2 : BUILD_X + BUILD_W + BIRD_W / 2;
+    playSFX(1800, 60);
+    return;
+  }
+
+  float speed = min(BIRD_SPEED_BASE + stage * BIRD_SPEED_INC, BIRD_SPEED_MAX);
+  if (slowActive(now)) speed *= SLOW_FACTOR;
+  bird.x += bird.dir * speed;
+
+  if (bird.x < BUILD_X - BIRD_W / 2 || bird.x > BUILD_X + BUILD_W + BIRD_W / 2) {
+    bird.active = false;
+    nextBirdTime = now + random(TIME_BIRD_MIN, TIME_BIRD_MAX);
+  }
+}
+
+int birdY() { return rowY[bird.row] - 4; }
+
+// Felix recibe un golpe de una roca o del pájaro
+void hitFelix() {
+  felixFixing = false;  // El golpe interrumpe la reparación
+  felixDirty = true;
+
+  if (felixHasShield) {
+    felixHasShield = false;  // El escudo absorbe el golpe: ni vida ni combo
+    playSFX(NOTE_C5, 120);
+  } else {
+    combo = 0;
+    felix.lives--;
+    updateLivesLEDs();
+    if (felix.lives <= 0) {
+      beginGameOver();
+      return;
+    }
+    playSFX(200, 300);
+  }
+
+  isInvincible = true;
+  invincibilityEndTime = millis() + TIME_INVINCIBLE;
+  lastFlickerTime = millis();
+  flickerVisible = false;
 }
 
 void checkCollisions() {
@@ -786,20 +1001,12 @@ void checkCollisions() {
 
     rocks[i].active = false;
     markDirty(rocks[i].col);
-    felixFixing = false;  // El golpe interrumpe la reparación
-    felix.lives--;
-    updateLivesLEDs();
-
-    if (felix.lives <= 0) {
-      beginGameOver();
-    } else {
-      playSFX(200, 300);
-      isInvincible = true;
-      invincibilityEndTime = millis() + TIME_INVINCIBLE;
-      lastFlickerTime = millis();
-      flickerVisible = false;
-    }
+    hitFelix();
     return;
+  }
+
+  if (bird.active && bird.row == felix.row && fabsf(bird.x - colX[felix.col]) < BIRD_HIT_RANGE) {
+    hitFelix();
   }
 }
 
@@ -821,6 +1028,17 @@ void updateTimedEffects(unsigned long now) {
   if (felixHasHammer && now >= hammerEndTime) {
     felixHasHammer = false;
     felixDirty = true;
+  }
+
+  // Objetos: caducan si nadie los recoge y reaparecen cada cierto tiempo
+  if (pickup.type != PICKUP_NONE) {
+    if (now >= pickup.expires) {
+      pickup.type = PICKUP_NONE;
+      markDirty(pickup.col);
+      schedulePickup(now);
+    }
+  } else if (now >= nextPickupTime) {
+    spawnPickup(now);
   }
 
   if (isInvincible) {
@@ -870,6 +1088,15 @@ void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h) {
   }
 }
 
+TFT_eSprite &pickupSprite(PickupType type) {
+  switch (type) {
+    case PICKUP_HEART:  return sprHeart;
+    case PICKUP_SLOW:   return sprClock;
+    case PICKUP_SHIELD: return sprShield;
+    default:            return sprHammer;
+  }
+}
+
 // Compone en `buf` todo lo que hay en la zona de pantalla que empieza en
 // (x0, y0) y mide lo que el búfer (pared, ventanas, martillo, Felix, rocas) y
 // la vuelca. La zona debe quedar dentro del edificio.
@@ -890,8 +1117,8 @@ void renderRegion(TFT_eSprite &buf, int x0, int y0) {
                        : sprWinFixed;
       win.pushToSprite(&buf, wx, wy);
 
-      if (hammerSpawned && hammerCol == c && hammerRow == r) {
-        sprHammer.pushToSprite(&buf, wx + 12, wy + 14, TFT_MAGENTA);
+      if (pickup.type != PICKUP_NONE && pickup.col == c && pickup.row == r) {
+        pickupSprite(pickup.type).pushToSprite(&buf, wx + 12, wy + 14, TFT_MAGENTA);
       }
     }
   }
@@ -902,11 +1129,17 @@ void renderRegion(TFT_eSprite &buf, int x0, int y0) {
     TFT_eSprite &frame = felixFixing ? sprFelixFix : sprFelix;
     frame.pushToSprite(&buf, fx - FELIX_OFFSET, fy - FELIX_OFFSET, TFT_MAGENTA);
     if (felixHasHammer) buf.fillRect(fx - 4, fy - 22, 8, 4, TFT_YELLOW);
+    if (felixHasShield) buf.drawRoundRect(fx - 14, fy - 14, 28, 28, 6, COLOR_GLASS_SHINE);
   }
 
   for (int i = 0; i < MAX_ROCKS; i++) {
     if (!rocks[i].active) continue;
     sprRock.pushToSprite(&buf, colX[rocks[i].col] - ROCK_OFFSET - x0, (int)rocks[i].y - ROCK_OFFSET - y0, TFT_MAGENTA);
+  }
+
+  if (bird.active) {
+    int frame = (millis() / TIME_BIRD_FLAP) % 2 + (bird.dir < 0 ? 2 : 0);
+    sprBird[frame].pushToSprite(&buf, (int)bird.x - BIRD_W / 2 - x0, birdY() - BIRD_H / 2 - y0, TFT_MAGENTA);
   }
 
   buf.pushSprite(x0, y0);
@@ -928,21 +1161,33 @@ void renderActorBox(int x, int y) {
 // Repinta a Felix: una sola caja si su posición anterior y la nueva caben
 // juntas (lo normal), o dos si se ha movido mucho entre fotogramas.
 void renderFelixArea() {
-  int minX = min(felixDrawnX, felix.px) - FELIX_OFFSET;
-  int maxX = max(felixDrawnX, felix.px) + FELIX_OFFSET;
+  int minX = min(felixDrawnX, felix.px) - FELIX_RECT_HALF;
+  int maxX = max(felixDrawnX, felix.px) + FELIX_RECT_HALF;
   int minY = min(felixDrawnY, felix.py) - FELIX_RECT_TOP;
-  int maxY = max(felixDrawnY, felix.py) + FELIX_OFFSET;
+  int maxY = max(felixDrawnY, felix.py) + FELIX_RECT_HALF;
 
   if (maxX - minX <= ACTOR_BUF_W && maxY - minY <= ACTOR_BUF_H) {
     renderActorBox(minX, minY);
   } else {
-    renderActorBox(felixDrawnX - FELIX_OFFSET, felixDrawnY - FELIX_RECT_TOP);
-    renderActorBox(felix.px - FELIX_OFFSET, felix.py - FELIX_RECT_TOP);
+    renderActorBox(felixDrawnX - FELIX_RECT_HALF, felixDrawnY - FELIX_RECT_TOP);
+    renderActorBox(felix.px - FELIX_RECT_HALF, felix.py - FELIX_RECT_TOP);
   }
 
   felixDrawnX = felix.px;
   felixDrawnY = felix.py;
   felixDirty = false;
+}
+
+// Repinta la franja por la que vuela el pájaro: cubre donde estaba y donde
+// está, y una última vez al irse para borrarlo.
+void renderBirdArea() {
+  int x = bird.active ? (int)bird.x : birdDrawnX;
+  int left = min(x, birdOnScreen ? birdDrawnX : x) - BIRD_W / 2 - 2;
+  left = constrain(left, BUILD_X, BUILD_X + BUILD_W - BIRD_BUF_W);
+  renderRegion(sprBirdBuf, left, birdY() - BIRD_BUF_H / 2);
+
+  birdDrawnX = x;
+  birdOnScreen = bird.active;
 }
 
 void drawRalph() {
@@ -976,6 +1221,7 @@ void drawGame() {
   }
 
   if (felixDirty || felix.px != felixDrawnX || felix.py != felixDrawnY) renderFelixArea();
+  if (bird.active || birdOnScreen) renderBirdArea();
 }
 
 // ---------- Pantallas de menú ----------
@@ -1187,6 +1433,11 @@ void updateOLED() {
   oled.setTextSize(2);
   oled.setCursor(0, 0);
   oled.print(felix.score);
+  if (comboMultiplier() > 1) {
+    oled.setTextSize(1);
+    oled.setCursor(oled.getCursorX() + 2, 8);
+    oled.print("x"); oled.print(comboMultiplier());
+  }
 
   // Vidas y etapa, alineadas a la derecha
   for (int i = 0; i < 3; i++) {
@@ -1211,12 +1462,17 @@ void updateOLED() {
   oled.setCursor(58, 23);
   oled.print(broken);
 
-  // Barra: tiempo de martillo que queda, o cuánto falta para la próxima roca
+  // Barra: tiempo de martillo o de reloj que queda, o cuánto falta para la próxima roca
   int fill;
   if (felixHasHammer && now < hammerEndTime) {
     oled.fillRect(76, 22, 9, 4, WHITE);  // Icono de martillo
     oled.fillRect(79, 26, 3, 6, WHITE);
     fill = map(hammerEndTime - now, 0, TIME_POWERUP_HAMMER, 0, OLED_BAR_W - 4);
+  } else if (slowActive(now)) {
+    oled.drawCircle(80, 26, 4, WHITE);   // Icono de reloj
+    oled.drawFastVLine(80, 23, 4, WHITE);
+    oled.drawFastHLine(80, 26, 3, WHITE);
+    fill = map(slowEndTime - now, 0, TIME_POWERUP_SLOW, 0, OLED_BAR_W - 4);
   } else {
     oled.fillCircle(80, 26, 4, WHITE);   // Icono de roca
     unsigned long sinceThrow = (now >= ralph.lastThrowTime) ? now - ralph.lastThrowTime : 0;
@@ -1337,7 +1593,8 @@ void gameLoop() {
 
       if (now - lastGameUpdate >= TICK_GAME) {
         lastGameUpdate = now;
-        updateRocks();
+        updateRocks(now);
+        updateBird(now);
         checkCollisions();
         if (currentState != PLAYING) break;
         drawGame();

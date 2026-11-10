@@ -213,11 +213,17 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 2. **Objetivo**: reparar todas las ventanas rotas del edificio antes de que Ralph te golpee con sus rocas.
 3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX (mantenerlo pulsado no repite). Cada reparación tarda 0,25 s, durante los que Felix no puede moverse; si recibe un golpe, la reparación se pierde. Cada etapa empieza con al menos 3 ventanas rotas.
 4. **Ralph**: en modo 1 jugador tiene IA; en modo 2 jugadores es controlado por una persona. Camina de columna en columna y, antes de cada lanzamiento, levanta los brazos durante 0,35 s: la roca cae cuando los baja. Las rocas caen verticalmente.
-5. **Martillo**: power-up que aparece aleatoriamente. Al recogerlo, Felix es invencible por 4 segundos y puede destruir rocas al instante.
+5. **Objetos**: cada 8–14 s aparece uno en una ventana al azar y desaparece a los 8 s si no se recoge. Felix lo recoge al pasar por esa ventana:
+   - **Martillo**: invencible durante 4 segundos.
+   - **Reloj**: rocas y pájaro a media velocidad durante 5 segundos.
+   - **Escudo**: absorbe el siguiente golpe sin perder vida ni combo. Se conserva entre etapas.
+   - **Corazón**: recupera una vida (solo aparece si falta alguna).
 6. **Invencibilidad**: al recibir un golpe, Felix parpadea durante 1.5 segundos sin poder ser dañado.
 7. **Vidas**: 3 vidas indicadas por LEDs. Al perder todas, Game Over.
 8. **Etapas**: al reparar todas las ventanas, se avanza de etapa. Cada etapa aumenta la velocidad de las rocas y la probabilidad de ventanas rotas, y acorta el tiempo entre lanzamientos de Ralph (de 2 s hasta un mínimo de 0,9 s).
-9. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa, 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
+9. **Pájaro**: desde la etapa 3, cada 5–9 s un pájaro cruza una fila entera del edificio (un pitido agudo lo anuncia). Golpea a Felix si está en esa fila cuando pasa por su columna.
+10. **Combo**: cada reparación seguida sin recibir un golpe sube el multiplicador de puntos (x2, x3… hasta x5). Un golpe lo devuelve a x1.
+11. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa (por el multiplicador de combo), 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
 
 ---
 
@@ -225,11 +231,11 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 
 Durante la partida, el display OLED de 128x32 muestra:
 
-- **Arriba a la izquierda:** puntuación actual, en grande.
+- **Arriba a la izquierda:** puntuación actual, en grande, y el multiplicador de combo (`x2`…`x5`) cuando está activo.
 - **Arriba a la derecha:** un corazón por vida y la etapa actual.
 - **Abajo a la izquierda, radar de rocas:** una casilla por columna del edificio. La marca sobre una casilla es Ralph (parpadea cuando va a lanzar), los puntos dentro son rocas cayendo y la base gruesa indica la columna de Felix.
 - **Abajo en el centro:** icono de ventana con el número de ventanas rotas que quedan.
-- **Abajo a la derecha:** barra que se llena hasta el próximo lanzamiento de Ralph (parpadea durante el aviso); con el martillo activo, muestra el tiempo que le queda.
+- **Abajo a la derecha:** barra que se llena hasta el próximo lanzamiento de Ralph (parpadea durante el aviso); con el martillo o el reloj activos, muestra el tiempo que les queda.
 
 En el menú muestra el modo elegido y su récord, y al terminar la partida, los puntos y la etapa alcanzada.
 
