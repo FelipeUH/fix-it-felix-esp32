@@ -108,6 +108,19 @@ const uint16_t COLOR_STEEL = RGB565(176, 180, 190);
 const int BRICK_W = 16;  // Divide la separación entre columnas: mismo dibujo en las tres
 const int BRICK_H = 8;
 
+// Pantallas de menú: muro en la parte baja con un cartel para el aviso
+const int SCREEN_W = 240;
+const int MENU_WALL_Y = 262;
+const int HINT_Y = 280;
+const int HINT_H = 26;
+const int MENU_OPTION_X = 30;
+const int MENU_OPTION_W = 180;
+const int MENU_OPTION_H = 30;
+const int MENU_OPTION_1_Y = 146;
+const int MENU_OPTION_2_Y = 184;
+const int MENU_RECORD_Y = 127;
+const unsigned long TIME_HINT_BLINK = 500;
+
 const unsigned long IA_DELAY_MIN = 100;
 const unsigned long IA_DELAY_MAX = 301;
 
@@ -251,6 +264,9 @@ bool felixHasHammer = false;
 unsigned long hammerEndTime = 0;
 
 bool startScreenDrawn = false;
+bool newRecordThisGame = false;
+bool hintVisible = true;
+unsigned long lastHintToggle = 0;
 bool prevFix = false;
 
 unsigned long lastGameUpdate = 0;
@@ -265,7 +281,10 @@ unsigned long gameOverStart = 0;
 void updateLivesLEDs();
 void updateOLED();
 void drawStartScreen();
+void drawMenuOptions();
+void drawStageClearScreen();
 void showGameOverScreen();
+void updateMenuOLED();
 void drawBuildingBase();
 void renderColumn(int c);
 void updateInvincibility(unsigned long now);
@@ -505,6 +524,7 @@ void loadHighScores() {
 void saveHighScoreIfBeaten() {
   if (felix.score <= highScore[activeMode]) return;
   highScore[activeMode] = felix.score;
+  newRecordThisGame = true;
   preferences.begin("felix_game", false);
   preferences.putLong(HIGHSCORE_KEYS[activeMode], felix.score);
   preferences.end();
@@ -587,6 +607,7 @@ void initGame() {
   stage = 1;
   felix.lives = 3;
   felix.score = 0;
+  newRecordThisGame = false;
   resetActors();
   generateStage();
   updateLivesLEDs();
@@ -613,17 +634,7 @@ void beginStageClear() {
   felix.score += SCORE_STAGE_BONUS;
   saveHighScoreIfBeaten();
 
-  tft.fillScreen(TFT_BLUE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(3);
-  tft.setCursor(40, 110);
-  tft.print("ETAPA ");
-  tft.print(stage);
-
-  tft.setTextSize(2);
-  tft.setCursor(35, 180);
-  tft.print("+"); tft.print(SCORE_STAGE_BONUS); tft.print(" PTS BONO");
-
+  drawStageClearScreen();
   updateOLED();
   playJingle(jingleStageNotes, jingleStageDurations, jingleStageLength);
   stageClearStart = millis();
@@ -631,12 +642,12 @@ void beginStageClear() {
 }
 
 void beginGameOver() {
+  currentState = GAMEOVER;
   saveHighScoreIfBeaten();
   playSFX(150, 1000);
   showGameOverScreen();
-  updateOLED();
+  updateMenuOLED();
   gameOverStart = millis();
-  currentState = GAMEOVER;
 }
 
 // Termina la reparación en curso: aquí es cuando la ventana mejora de verdad
@@ -967,66 +978,178 @@ void drawGame() {
   if (felixDirty || felix.px != felixDrawnX || felix.py != felixDrawnY) renderFelixArea();
 }
 
-void drawStartScreen() {
-  tft.fillScreen(TFT_BLUE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(3);
-  tft.setCursor(20, 40);
-  tft.print("FIX IT");
-  tft.setCursor(20, 80);
-  tft.print("FELIX!");
+// ---------- Pantallas de menú ----------
+// Todas comparten fondo (cielo con estrellas y un muro abajo) y tipografía:
+// la fuente de píxeles escalada, a juego con los sprites.
 
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_YELLOW);
-  tft.setCursor(20, 125);
-  tft.print("RECORD MAXIMO: "); tft.print(highScore[selectedMode]);
+void drawShadowText(const char *text, int x, int y, int size, uint16_t color, uint16_t shadow) {
+  int offset = max(1, size / 2);
+  tft.setTextFont(1);
+  tft.setTextSize(size);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(shadow);
+  tft.drawString(text, x + offset, y + offset);
+  tft.setTextColor(color);
+  tft.drawString(text, x, y);
+}
 
+void drawBackdrop() {
+  tft.fillScreen(COLOR_SKY);
+
+  // Estrellas en los márgenes, fuera de las zonas que se redibujan
+  static const uint8_t stars[][2] = {
+    {8, 10}, {30, 4}, {222, 14}, {200, 6}, {14, 108}, {228, 100}, {6, 160},
+    {234, 150}, {12, 226}, {226, 236}, {120, 6}, {74, 12}, {166, 8}, {18, 60}, {224, 64},
+  };
+  for (auto &star : stars) tft.drawPixel(star[0], star[1], TFT_WHITE);
+  tft.fillRect(40, 20, 2, 2, COLOR_GLASS_SHINE);
+  tft.fillRect(206, 30, 2, 2, COLOR_GLASS_SHINE);
+
+  int wallH = SCREEN_MAX_Y - MENU_WALL_Y;
+  tft.setViewport(0, MENU_WALL_Y, SCREEN_W, wallH);
+  drawBricks(tft, BUILD_X, BUILD_Y, SCREEN_W, wallH);
+  tft.resetViewport();
+  tft.fillRect(0, MENU_WALL_Y, SCREEN_W, 3, COLOR_SILL);
+}
+
+// Texto del cartel del muro. Se repinta con color de fondo, así puede
+// parpadear sin borrar nada.
+void drawHintText(const char *text, bool visible) {
+  tft.setTextFont(1);
   tft.setTextSize(2);
-  tft.setTextColor(TFT_WHITE);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(visible ? TFT_YELLOW : COLOR_ROOM, COLOR_ROOM);
+  tft.drawString(text, SCREEN_W / 2, HINT_Y + HINT_H / 2);
+}
 
-  tft.setCursor(30, 165);
-  tft.print(selectedMode == ONE_PLAYER ? "> 1 JUGADOR" : "  1 JUGADOR");
+void drawHintPlaque() {
+  tft.fillRoundRect(10, HINT_Y, SCREEN_W - 20, HINT_H, 5, COLOR_ROOM);
+  tft.drawRoundRect(10, HINT_Y, SCREEN_W - 20, HINT_H, 5, COLOR_STEEL);
+}
 
-  tft.setCursor(30, 205);
-  tft.print(selectedMode == TWO_PLAYERS ? "> 2 JUGADORES" : "  2 JUGADORES");
+void drawPressFixHint(bool visible) {
+  char text[24];
+  snprintf(text, sizeof(text), "PULSA %s", platformFixLabel());
+  drawHintText(text, visible);
+  hintVisible = visible;
+  lastHintToggle = millis();
+}
 
-  tft.setTextSize(1);
-  tft.setCursor(25, 270);
-  tft.print("Arriba/Abajo para elegir");
-  tft.setCursor(25, 290);
-  tft.print("Presiona "); tft.print(platformFixLabel());
+void updateHintBlink(unsigned long now) {
+  if (now - lastHintToggle >= TIME_HINT_BLINK) drawPressFixHint(!hintVisible);
+}
+
+// Panel con filas "ETIQUETA ........ valor"
+void drawPanel(int y, int h) {
+  tft.fillRoundRect(20, y, SCREEN_W - 40, h, 6, COLOR_ROOM);
+  tft.drawRoundRect(20, y, SCREEN_W - 40, h, 6, COLOR_STEEL);
+}
+
+void drawPanelRow(const char *label, long value, int y, uint16_t color) {
+  tft.setTextFont(1);
+  tft.setTextSize(2);
+  tft.setTextColor(color);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(label, 32, y);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawNumber(value, SCREEN_W - 32, y);
+}
+
+void drawMenuOption(int y, const char *label, bool selected) {
+  tft.fillRoundRect(MENU_OPTION_X, y, MENU_OPTION_W, MENU_OPTION_H, 6, selected ? TFT_YELLOW : COLOR_ROOM);
+  tft.drawRoundRect(MENU_OPTION_X, y, MENU_OPTION_W, MENU_OPTION_H, 6, selected ? TFT_WHITE : COLOR_STEEL);
+  if (selected) {
+    int cy = y + MENU_OPTION_H / 2;
+    tft.fillTriangle(MENU_OPTION_X + 10, cy - 7, MENU_OPTION_X + 10, cy + 7, MENU_OPTION_X + 20, cy, COLOR_SHIRT);
+  }
+  tft.setTextFont(1);
+  tft.setTextSize(2);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(selected ? TFT_BLACK : TFT_WHITE);
+  tft.drawString(label, MENU_OPTION_X + 30, y + MENU_OPTION_H / 2);
+}
+
+// Parte del menú que cambia al mover la selección: las dos opciones y el
+// récord del modo elegido. No repinta el resto de la pantalla.
+void drawMenuOptions() {
+  drawMenuOption(MENU_OPTION_1_Y, "1 JUGADOR", selectedMode == ONE_PLAYER);
+  drawMenuOption(MENU_OPTION_2_Y, "2 JUGADORES", selectedMode == TWO_PLAYERS);
+
+  char text[24];
+  snprintf(text, sizeof(text), "RECORD %ld", highScore[selectedMode]);
+  tft.fillRect(0, MENU_RECORD_Y - 9, SCREEN_W, 18, COLOR_SKY);
+  tft.setTextFont(1);
+  tft.setTextSize(2);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_GLASS_SHINE);
+  tft.drawString(text, SCREEN_W / 2, MENU_RECORD_Y);
+
+  updateMenuOLED();
+}
+
+void drawStartScreen() {
+  drawBackdrop();
+
+  drawShadowText("FIX-IT", SCREEN_W / 2, 42, 5, TFT_YELLOW, COLOR_SHIRT);
+  drawShadowText("FELIX!", SCREEN_W / 2, 88, 5, TFT_YELLOW, COLOR_SHIRT);
+
+  // Los dos personajes sobre el muro
+  sprFelix.pushSprite(36, MENU_WALL_Y - FELIX_SIZE, TFT_MAGENTA);
+  sprRalph.pushSprite(172, MENU_WALL_Y - RALPH_SIZE);
+
+  drawMenuOptions();
+  drawHintPlaque();
+  drawPressFixHint(true);
+}
+
+void drawStageClearScreen() {
+  drawBackdrop();
+
+  drawShadowText("BIEN HECHO!", SCREEN_W / 2, 30, 2, TFT_WHITE, COLOR_DENIM_DARK);
+
+  char text[16];
+  snprintf(text, sizeof(text), "ETAPA %d", stage);
+  drawShadowText(text, SCREEN_W / 2, 76, stage < 10 ? 5 : 4, TFT_YELLOW, COLOR_SHIRT);
+
+  drawPanel(124, 76);
+  drawPanelRow("BONO", SCORE_STAGE_BONUS, 138, TFT_YELLOW);
+  drawPanelRow("PUNTOS", felix.score, 170, TFT_WHITE);
+
+  sprFelixFix.pushSprite((SCREEN_W - FELIX_SIZE) / 2, MENU_WALL_Y - FELIX_SIZE, TFT_MAGENTA);
+
+  drawHintPlaque();
+  drawHintText("PREPARATE...", true);
 }
 
 void showGameOverScreen() {
-  tft.fillScreen(TFT_RED);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(3);
-  tft.setCursor(40, 70);
-  tft.print("GAME OVER");
+  drawBackdrop();
 
-  tft.setTextSize(2);
+  drawShadowText("GAME OVER", SCREEN_W / 2, 40, 4, TFT_WHITE, COLOR_SHIRT);
   if (activeMode == TWO_PLAYERS) {
-    tft.setCursor(40, 115);
-    tft.print("Gana Ralph!");
+    drawShadowText("GANA RALPH!", SCREEN_W / 2, 78, 2, TFT_YELLOW, COLOR_SHIRT);
   }
 
-  tft.setCursor(40, 150);
-  tft.print("Pts: ");
-  tft.print(felix.score);
+  drawPanel(98, 124);
+  drawPanelRow("PUNTOS", felix.score, 112, TFT_WHITE);
+  drawPanelRow("ETAPA", stage, 142, TFT_WHITE);
+  drawPanelRow("RECORD", highScore[activeMode], 172, COLOR_GLASS_SHINE);
+  if (newRecordThisGame) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_YELLOW);
+    tft.drawString("NUEVO RECORD!", SCREEN_W / 2, 206);
+  }
 
-  tft.setTextColor(TFT_YELLOW);
-  tft.setCursor(40, 190);
-  tft.print("Max: ");
-  tft.print(highScore[activeMode]);
+  // Ralph celebra sobre el muro
+  sprRalphThrow.pushSprite((SCREEN_W - RALPH_SIZE) / 2, MENU_WALL_Y - RALPH_SIZE);
 
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(20, 250);
-  tft.print("Presiona "); tft.print(platformFixLabel());
+  drawHintPlaque();
+  drawPressFixHint(true);
 }
 
 // ================= RENDERIZADO OLED =================
 void updateOLED() {
   oled.clearDisplay();
+  oled.setTextSize(1);
 
   oled.setCursor(0, 0);
   oled.print("P:"); oled.print(felix.score);
@@ -1053,6 +1176,29 @@ void updateOLED() {
   oled.drawRect(0, 26, OLED_WIDTH, 6, WHITE);
   oled.fillRect(0, 26, barWidth, 6, WHITE);
 
+  oled.display();
+}
+
+// OLED fuera de la partida: modo y récord en el menú, resultado al terminar
+void updateMenuOLED() {
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  if (currentState == GAMEOVER) {
+    oled.setTextSize(2);
+    oled.setCursor(10, 0);
+    oled.print("GAME OVER");
+    oled.setTextSize(1);
+    oled.setCursor(0, 22);
+    oled.print("Pts:"); oled.print(felix.score);
+    oled.print("  Etapa:"); oled.print(stage);
+  } else {
+    oled.setCursor(28, 0);
+    oled.print("FIX-IT FELIX");
+    oled.setCursor(0, 12);
+    oled.print(selectedMode == ONE_PLAYER ? "> 1 JUGADOR" : "> 2 JUGADORES");
+    oled.setCursor(0, 24);
+    oled.print("Record: "); oled.print(highScore[selectedMode]);
+  }
   oled.display();
 }
 
@@ -1107,11 +1253,12 @@ void gameLoop() {
         drawStartScreen();
         startScreenDrawn = true;
       }
+      updateHintBlink(now);
       if (now - menuDebounceTime <= TIME_MENU_DEBOUNCE) break;
 
       if (in.up || in.down) {
         selectedMode = (selectedMode == ONE_PLAYER) ? TWO_PLAYERS : ONE_PLAYER;
-        drawStartScreen();
+        drawMenuOptions();
         menuDebounceTime = now;
         playSFX(NOTE_E4, 50);
       } else if (fixPressed) {
@@ -1153,6 +1300,7 @@ void gameLoop() {
       break;
 
     case GAMEOVER:
+      updateHintBlink(now);
       if (fixPressed && now - gameOverStart >= TIME_GAMEOVER_LOCK) {
         playSFX(NOTE_C5, 200);
         currentState = START;
