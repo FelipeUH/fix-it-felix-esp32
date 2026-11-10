@@ -64,7 +64,7 @@ const int BUILD_H = 280;
 const int RALPH_FIXED_Y = BUILD_Y - RALPH_SIZE;  // Ralph de pie sobre la azotea
 
 const unsigned long TICK_GAME = 30;
-const unsigned long TICK_OLED = 200;
+const unsigned long TICK_OLED = 120;
 const unsigned long TIME_DEBOUNCE = 150;        // Repetición de movimiento al mantener
 const unsigned long TIME_MENU_DEBOUNCE = 200;
 const unsigned long TIME_STAGE_SCREEN = 2600;   // Duración de la pantalla "ETAPA N"
@@ -1147,34 +1147,86 @@ void showGameOverScreen() {
 }
 
 // ================= RENDERIZADO OLED =================
+// Panel de juego (128x32):
+//   arriba:  puntos en grande | corazones de vida y etapa
+//   abajo:   radar de rocas | ventanas rotas que quedan | barra de Ralph o martillo
+const unsigned char ICON_HEART_FULL[] PROGMEM = {0x6C, 0xFE, 0xFE, 0x7C, 0x38, 0x10};
+const unsigned char ICON_HEART_EMPTY[] PROGMEM = {0x6C, 0x92, 0x82, 0x44, 0x28, 0x10};
+
+const int RADAR_CELL = 12;
+const int RADAR_PITCH = 14;
+const int RADAR_Y = 20;
+const int OLED_BAR_X = 88;
+const int OLED_BAR_W = 40;
+
+// Una casilla por columna del edificio: marca sobre ella = Ralph (parpadea
+// cuando va a lanzar), puntos dentro = rocas cayendo, base gruesa = Felix.
+void drawOLEDRadar(unsigned long now) {
+  bool blinkOn = (now / 100) % 2 == 0;
+
+  for (int c = 0; c < COLS; c++) {
+    int x = c * RADAR_PITCH;
+    oled.drawRect(x, RADAR_Y, RADAR_CELL, RADAR_CELL, WHITE);
+    if (c == felix.col) oled.fillRect(x, RADAR_Y + RADAR_CELL - 3, RADAR_CELL, 3, WHITE);
+    if (c == ralph.col && (!ralphThrowing || blinkOn)) oled.fillRect(x + 2, RADAR_Y - 3, RADAR_CELL - 4, 2, WHITE);
+  }
+
+  for (int i = 0; i < MAX_ROCKS; i++) {
+    if (!rocks[i].active) continue;
+    int y = RADAR_Y + 1 + (int)((rocks[i].y - BUILD_Y) * (RADAR_CELL - 6) / BUILD_H);
+    oled.fillRect(rocks[i].col * RADAR_PITCH + 4, constrain(y, RADAR_Y + 1, RADAR_Y + RADAR_CELL - 6), 4, 2, WHITE);
+  }
+}
+
 void updateOLED() {
-  oled.clearDisplay();
-  oled.setTextSize(1);
-
-  oled.setCursor(0, 0);
-  oled.print("P:"); oled.print(felix.score);
-  oled.setCursor(55, 0);
-  oled.print("E:"); oled.print(stage);
-  oled.setCursor(95, 0);
-  oled.print("V:"); oled.print(felix.lives);
-
   unsigned long now = millis();
-  oled.setCursor(0, 16);
-  if (felixHasHammer && now < hammerEndTime) {
-    oled.print("MARTILLO: ");
-    oled.print((hammerEndTime - now) / 1000 + 1);
-    oled.print("s");
-  } else {
-    oled.print("Ralph Cooldown:");
-  }
+  oled.clearDisplay();
+  oled.setTextColor(WHITE);
 
-  unsigned long timeSinceThrow = (now >= ralph.lastThrowTime) ? now - ralph.lastThrowTime : 0;
-  int barWidth = OLED_WIDTH;
-  if (timeSinceThrow < ralphCooldown()) {
-    barWidth = map(timeSinceThrow, 0, ralphCooldown(), 0, OLED_WIDTH);
+  // Puntos
+  oled.setTextSize(2);
+  oled.setCursor(0, 0);
+  oled.print(felix.score);
+
+  // Vidas y etapa, alineadas a la derecha
+  for (int i = 0; i < 3; i++) {
+    oled.drawBitmap(OLED_WIDTH - 34 + i * 12, 0, i < felix.lives ? ICON_HEART_FULL : ICON_HEART_EMPTY, 8, 6, WHITE);
   }
-  oled.drawRect(0, 26, OLED_WIDTH, 6, WHITE);
-  oled.fillRect(0, 26, barWidth, 6, WHITE);
+  char stageText[12];
+  int len = snprintf(stageText, sizeof(stageText), "ETAPA %d", stage);
+  oled.setTextSize(1);
+  oled.setCursor(OLED_WIDTH - len * 6, 9);
+  oled.print(stageText);
+
+  drawOLEDRadar(now);
+
+  // Ventanas que faltan por reparar
+  int broken = 0;
+  for (int c = 0; c < COLS; c++)
+    for (int r = 0; r < ROWS; r++)
+      if (building[c][r].state > 0) broken++;
+  oled.drawRect(46, 21, 9, 11, WHITE);
+  oled.drawFastVLine(50, 21, 11, WHITE);
+  oled.drawFastHLine(46, 26, 9, WHITE);
+  oled.setCursor(58, 23);
+  oled.print(broken);
+
+  // Barra: tiempo de martillo que queda, o cuánto falta para la próxima roca
+  int fill;
+  if (felixHasHammer && now < hammerEndTime) {
+    oled.fillRect(76, 22, 9, 4, WHITE);  // Icono de martillo
+    oled.fillRect(79, 26, 3, 6, WHITE);
+    fill = map(hammerEndTime - now, 0, TIME_POWERUP_HAMMER, 0, OLED_BAR_W - 4);
+  } else {
+    oled.fillCircle(80, 26, 4, WHITE);   // Icono de roca
+    unsigned long sinceThrow = (now >= ralph.lastThrowTime) ? now - ralph.lastThrowTime : 0;
+    unsigned long cooldown = ralphCooldown();
+    fill = (sinceThrow >= cooldown) ? OLED_BAR_W - 4 : map(sinceThrow, 0, cooldown, 0, OLED_BAR_W - 4);
+    // Ralph con los brazos en alto: la barra entera parpadea como aviso
+    if (ralphThrowing) fill = ((now / 100) % 2 == 0) ? OLED_BAR_W - 4 : 0;
+  }
+  oled.drawRect(OLED_BAR_X, 21, OLED_BAR_W, 11, WHITE);
+  oled.fillRect(OLED_BAR_X + 2, 23, fill, 7, WHITE);
 
   oled.display();
 }
@@ -1183,6 +1235,7 @@ void updateOLED() {
 void updateMenuOLED() {
   oled.clearDisplay();
   oled.setTextSize(1);
+  oled.setTextColor(WHITE);
   if (currentState == GAMEOVER) {
     oled.setTextSize(2);
     oled.setCursor(10, 0);
@@ -1192,10 +1245,15 @@ void updateMenuOLED() {
     oled.print("Pts:"); oled.print(felix.score);
     oled.print("  Etapa:"); oled.print(stage);
   } else {
+    oled.setTextColor(WHITE);
     oled.setCursor(28, 0);
     oled.print("FIX-IT FELIX");
-    oled.setCursor(0, 12);
-    oled.print(selectedMode == ONE_PLAYER ? "> 1 JUGADOR" : "> 2 JUGADORES");
+    // Modo elegido en una barra invertida
+    oled.fillRect(0, 10, OLED_WIDTH, 11, WHITE);
+    oled.setTextColor(BLACK);
+    oled.setCursor(4, 12);
+    oled.print(selectedMode == ONE_PLAYER ? "1 JUGADOR" : "2 JUGADORES");
+    oled.setTextColor(WHITE);
     oled.setCursor(0, 24);
     oled.print("Record: "); oled.print(highScore[selectedMode]);
   }

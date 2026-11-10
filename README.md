@@ -223,12 +223,15 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 
 ## Información adicional en el OLED
 
-El display OLED de 128x32 muestra en tiempo real:
-- **P:** Puntuación actual
-- **E:** Etapa actual
-- **V:** Vidas restantes
-- Barra de progreso del cooldown de Ralph (cuándo podrá lanzar la próxima roca)
-- Temporizador del martillo (si está activo)
+Durante la partida, el display OLED de 128x32 muestra:
+
+- **Arriba a la izquierda:** puntuación actual, en grande.
+- **Arriba a la derecha:** un corazón por vida y la etapa actual.
+- **Abajo a la izquierda, radar de rocas:** una casilla por columna del edificio. La marca sobre una casilla es Ralph (parpadea cuando va a lanzar), los puntos dentro son rocas cayendo y la base gruesa indica la columna de Felix.
+- **Abajo en el centro:** icono de ventana con el número de ventanas rotas que quedan.
+- **Abajo a la derecha:** barra que se llena hasta el próximo lanzamiento de Ralph (parpadea durante el aviso); con el martillo activo, muestra el tiempo que le queda.
+
+En el menú muestra el modo elegido y su récord, y al terminar la partida, los puntos y la etapa alcanzada.
 
 ---
 
