@@ -11,7 +11,11 @@ El repositorio contiene dos versiones del mismo juego:
 | `fix_it_felix_rf/` | Radiofrecuencia (433 MHz) | RCSwitch |
 | `fix_it_felix_bluetooth/` | Bluetooth (gamepad) | Bluepad32 |
 
-Ambos comparten la misma mecánica, sprites, lógica de juego y periféricos. La única diferencia es cómo se controla a Ralph en el modo de 2 jugadores.
+Ambos comparten la misma mecánica, sprites, lógica de juego y periféricos. La única diferencia es cómo se controla a cada personaje.
+
+Toda la lógica del juego vive en un único archivo, `shared/felix_game.h`. Cada carpeta de sketch contiene solo su capa de control (`.ino`) y un **enlace simbólico** `felix_game.h` que apunta al archivo compartido, de modo que cualquier cambio en el juego aplica a las dos versiones.
+
+> En Windows, Git solo crea enlaces simbólicos si está activado `core.symlinks` (requiere Modo desarrollador). Si `felix_game.h` aparece como un archivo de texto con una ruta dentro, copia `shared/felix_game.h` sobre él en cada carpeta.
 
 ---
 
@@ -137,7 +141,7 @@ text
 ## Carga del programa
 
 1. Abrir el archivo `.ino` correspondiente en Arduino IDE:
-   - Para RF: `fix_it_felix_rf/fix_it_felix.ino`
+   - Para RF: `fix_it_felix_rf/fix_it_felix_rf.ino`
    - Para Bluetooth: `fix_it_felix_bluetooth/fix_it_felix_bluetooth.ino`
 2. Conectar el ESP32 por USB
 3. Seleccionar el puerto COM correspondiente (Herramientas → Puerto)
@@ -182,6 +186,10 @@ Ralph es controlado por la **IA** del ESP32. Persigue a Felix y lanza rocas auto
 
 #### Versión Bluetooth (`fix_it_felix_bluetooth/`)
 
+En **1 jugador**, Felix se maneja con el gamepad Bluetooth **o** con los pulsadores de la placa (mismos que en la tabla de 1 jugador).
+
+El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos (por ejemplo, para usar otro mando), mantén pulsado **FIX** mientras enciendes o reinicias el ESP32.
+
 **Jugador 1 (Felix):** usa un **gamepad Bluetooth** conectado al ESP32.
 
 | Control | Acción |
@@ -203,13 +211,13 @@ Ralph es controlado por la **IA** del ESP32. Persigue a Felix y lanza rocas auto
 
 1. **Pantalla de inicio**: muestra el título, el récord máximo y la selección de modo (1 o 2 jugadores). Usar Arriba/Abajo para cambiar y FIX/B para confirmar.
 2. **Objetivo**: reparar todas las ventanas rotas del edificio antes de que Ralph te golpee con sus rocas.
-3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX.
+3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX (mantenerlo pulsado no repite). Cada etapa empieza con al menos 3 ventanas rotas.
 4. **Ralph**: en modo 1 jugador tiene IA; en modo 2 jugadores es controlado por una persona. Lanza rocas que caen verticalmente.
 5. **Martillo**: power-up que aparece aleatoriamente. Al recogerlo, Felix es invencible por 4 segundos y puede destruir rocas al instante.
 6. **Invencibilidad**: al recibir un golpe, Felix parpadea durante 1.5 segundos sin poder ser dañado.
 7. **Vidas**: 3 vidas indicadas por LEDs. Al perder todas, Game Over.
 8. **Etapas**: al reparar todas las ventanas, se avanza de etapa. Cada etapa aumenta la velocidad de las rocas y la probabilidad de ventanas rotas.
-9. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa, 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences).
+9. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa, 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
 
 ---
 
@@ -282,6 +290,7 @@ GND          ───────────────── GND
 | OLED no muestra nada | Dirección I2C incorrecta | Ejecutar scanner I2C para verificar; si es `0x3D`, cambiar `OLED_ADDR` |
 | No compila Bluepad32 | Toolchain no instalado correctamente | Seguir la guía de instalación de Bluepad32 (sección 5). Asegurarse de haber instalado el paquete "ESP32 + Bluepad32" y seleccionado la placa correspondiente |
 | No recibe RF | Códigos del mando distintos | Usar el ejemplo `ReceiveDemo_Advanced` de RCSwitch para obtener los códigos reales y actualizar `RF_LEFT`, `RF_RIGHT`, `RF_THROW`. Verificar también el level shifter |
-| Gamepad BT no conecta | ESP32 en modo conflicto | Pulsar botón de reset del ESP32 mientras se empareja el gamepad. Asegurarse de haber seleccionado la placa "ESP32 + Bluepad32" |
+| Gamepad BT no conecta | Emparejamiento antiguo o ESP32 en modo conflicto | Reiniciar el ESP32 manteniendo FIX pulsado para borrar los emparejamientos y volver a emparejar el gamepad. Asegurarse de haber seleccionado la placa "ESP32 + Bluepad32" |
+| Al subir: `Failed to communicate with the flash chip` | El circuito alimentado desde el pin de 5V interfiere en modo de carga | Desconectar el cable de 5V que va del ESP32 al circuito, subir el programa y volver a conectarlo |
 | El ESP32 se reinicia al conectar RXB6 | Voltaje de 5V en pin GPIO | Revisar urgentemente el nivel lógico: usar level shifter obligatorio |
 
