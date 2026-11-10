@@ -77,6 +77,36 @@ const unsigned long TIME_POWERUP_HAMMER = 4000;
 const unsigned long TIME_INVINCIBLE = 1500;
 const unsigned long TIME_FLICKER = 100;
 
+const unsigned long TIME_HOP = 120;          // Duración del salto de Felix entre ventanas
+const int HOP_HEIGHT = 6;                    // Altura del arco del salto (px)
+const unsigned long TIME_FIX_ANIM = 150;     // Felix con el martillo en alto
+const unsigned long TIME_RALPH_THROW = 250;  // Ralph con los brazos en alto
+
+// Área que se recompone alrededor de Felix (cabe su posición anterior y la nueva)
+const int ACTOR_BUF_W = 48;
+const int ACTOR_BUF_H = 64;
+const int FELIX_RECT_TOP = 24;  // Por encima del centro: sprite + indicador de martillo
+
+// Paleta (RGB565)
+#define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+const uint16_t COLOR_SKY = RGB565(10, 14, 40);
+const uint16_t COLOR_BRICK = RGB565(152, 72, 52);
+const uint16_t COLOR_MORTAR = RGB565(96, 44, 32);
+const uint16_t COLOR_FRAME = RGB565(226, 220, 200);
+const uint16_t COLOR_SILL = RGB565(170, 164, 148);
+const uint16_t COLOR_GLASS = RGB565(110, 196, 236);
+const uint16_t COLOR_GLASS_SHINE = RGB565(214, 240, 252);
+const uint16_t COLOR_ROOM = RGB565(22, 22, 44);
+const uint16_t COLOR_SKIN = RGB565(248, 190, 140);
+const uint16_t COLOR_HAIR = RGB565(110, 60, 26);
+const uint16_t COLOR_DENIM = RGB565(40, 90, 210);
+const uint16_t COLOR_DENIM_DARK = RGB565(24, 52, 130);
+const uint16_t COLOR_SHIRT = RGB565(206, 44, 36);
+const uint16_t COLOR_BOOT = RGB565(92, 56, 30);
+const uint16_t COLOR_STEEL = RGB565(176, 180, 190);
+const int BRICK_W = 16;  // Divide la separación entre columnas: mismo dibujo en las tres
+const int BRICK_H = 8;
+
 const unsigned long IA_DELAY_MIN = 100;
 const unsigned long IA_DELAY_MAX = 301;
 
@@ -144,15 +174,18 @@ Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 Preferences preferences;
 
 TFT_eSprite sprFelix = TFT_eSprite(&tft);
+TFT_eSprite sprFelixFix = TFT_eSprite(&tft);
 TFT_eSprite sprRalph = TFT_eSprite(&tft);
+TFT_eSprite sprRalphThrow = TFT_eSprite(&tft);
 TFT_eSprite sprRock = TFT_eSprite(&tft);
 TFT_eSprite sprWinFixed = TFT_eSprite(&tft);
 TFT_eSprite sprWinBroken = TFT_eSprite(&tft);
 TFT_eSprite sprWinFullyBroken = TFT_eSprite(&tft);
 TFT_eSprite sprHammer = TFT_eSprite(&tft);
-// Búfer de una columna del edificio: se compone entera en RAM y se vuelca de una
+// Búferes de composición: cada zona se dibuja entera en RAM y se vuelca de una
 // vez, así nada se borra y repinta a la vista (sin parpadeo).
-TFT_eSprite sprColumn = TFT_eSprite(&tft);
+TFT_eSprite sprColumn = TFT_eSprite(&tft);  // Una columna del edificio (rocas)
+TFT_eSprite sprActor = TFT_eSprite(&tft);   // Entorno de Felix (saltos entre ventanas)
 
 // ================= ESTRUCTURAS Y MODOS =================
 enum GameState { START, PLAYING, STAGE_CLEAR, GAMEOVER };
@@ -165,9 +198,13 @@ GameMode activeMode = ONE_PLAYER;
 struct Window { int state; };  // 0 intacta, 1 rota, 2 muy rota
 
 struct PlayerFelix {
-  int col, row;
+  int col, row;   // Celda lógica: cambia al instante y es la que cuenta para colisiones
   int lives;
   long score;
+  int px, py;     // Centro en pantalla; va con retraso respecto a la celda durante el salto
+  int fromX, fromY;
+  unsigned long hopStart;
+  bool hopping;
 };
 
 struct PlayerRalph {
@@ -187,10 +224,17 @@ struct Rock {
 
 // ================= VARIABLES DE ESTADO =================
 Window building[COLS][ROWS];
-PlayerFelix felix = {1, 3, 3, 0};
+PlayerFelix felix = {1, 3, 3, 0, 0, 0, 0, 0, 0, false};
 PlayerRalph ralph = {1, 1, 0, true, 1, 0, false};
 Rock rocks[MAX_ROCKS];
 bool colDirty[COLS];
+bool felixDirty = false;
+int felixDrawnX = 0, felixDrawnY = 0;  // Dónde está pintado Felix ahora mismo
+
+bool felixFixing = false;
+unsigned long felixFixUntil = 0;
+bool ralphThrowing = false;
+unsigned long ralphThrowUntil = 0;
 
 int stage = 1;
 long highScore[2] = {0, 0};  // Récord por modo, indexado por GameMode
@@ -225,6 +269,7 @@ void drawStartScreen();
 void showGameOverScreen();
 void drawBuildingBase();
 void renderColumn(int c);
+void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h);
 
 // ================= GESTIÓN DE AUDIO =================
 void buzz(int freq) {
@@ -284,55 +329,169 @@ void handleAudio(unsigned long now) {
 }
 
 // ================= INICIALIZACIÓN DE SPRITES =================
-void buildSprites() {
-  sprFelix.createSprite(FELIX_SIZE, FELIX_SIZE);
-  sprFelix.fillSprite(TFT_MAGENTA);
-  sprFelix.fillRect(4, 8, 16, 16, TFT_BLUE);
-  sprFelix.fillRect(6, 2, 12, 10, TFT_ORANGE);
-  sprFelix.fillRect(2, 0, 20, 4, TFT_YELLOW);
+// Los personajes se definen como mapas de caracteres (un carácter = un píxel
+// del dibujo) y se escalan al crear el sprite. '.' es el fondo.
+uint16_t artColor(char ch, uint16_t background) {
+  switch (ch) {
+    case 'y': return TFT_YELLOW;
+    case 's': return COLOR_SKIN;
+    case 'k': return TFT_BLACK;
+    case 'w': return TFT_WHITE;
+    case 'b': return COLOR_DENIM;
+    case 'B': return COLOR_DENIM_DARK;
+    case 'r': return COLOR_SHIRT;
+    case 'h': return COLOR_HAIR;
+    case 'n': return COLOR_BOOT;
+    case 'g': return COLOR_STEEL;
+    default:  return background;
+  }
+}
 
-  sprRalph.createSprite(RALPH_SIZE, RALPH_SIZE);
-  sprRalph.fillSprite(TFT_MAGENTA);
-  sprRalph.fillRect(0, 10, 32, 22, TFT_RED);
-  sprRalph.fillRect(8, 2, 16, 12, TFT_ORANGE);
-  sprRalph.fillCircle(12, 6, 2, TFT_BLACK);
-  sprRalph.fillCircle(20, 6, 2, TFT_BLACK);
+void buildArtSprite(TFT_eSprite &spr, const char *const *rows, int size, int scale, uint16_t background) {
+  spr.createSprite(size * scale, size * scale);
+  spr.fillSprite(background);
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      uint16_t color = artColor(rows[y][x], background);
+      if (color != background) spr.fillRect(x * scale, y * scale, scale, scale, color);
+    }
+  }
+}
+
+const char *const ART_FELIX[12] = {
+  "....yyyy....",
+  "...yyyyyy...",
+  "..yyyyyyyyy.",
+  "...sksssk...",
+  "...sssssss..",
+  "....sssss...",
+  "..bbbbbbbb..",
+  ".sbbwbbwbbs.",
+  ".sbbbbbbbbs.",
+  "..bbbbbbbb..",
+  "..BBB..BBB..",
+  ".nnnn..nnnn.",
+};
+
+const char *const ART_FELIX_FIX[12] = {
+  "....yyyy..gg",
+  "...yyyyyy.gg",
+  "..yyyyyyyyn.",
+  "...sksssk.n.",
+  "...sssssssn.",
+  "....sssss.s.",
+  "..bbbbbbbbb.",
+  ".sbbwbbwbb..",
+  ".sbbbbbbbb..",
+  "..bbbbbbbb..",
+  "..BBB..BBB..",
+  ".nnnn..nnnn.",
+};
+
+const char *const ART_RALPH[16] = {
+  "....hhhhhhhh....",
+  "...hhhhhhhhhh...",
+  "...hsssssssshh..",
+  "...sskssssksss..",
+  "...sssssssssss..",
+  "....sskkkkkss...",
+  ".....sssssss....",
+  "..rrrrrrrrrrrr..",
+  ".rrrrrrrrrrrrrr.",
+  "sssrrrrrrrrrrsss",
+  "sssrrrrrrrrrrsss",
+  "sss.rrrrrrrr.sss",
+  "....rrrrrrrr....",
+  "....nnnnnnnn....",
+  "....nnn..nnn....",
+  "...kkkk..kkkk...",
+};
+
+const char *const ART_RALPH_THROW[16] = {
+  "sss.hhhhhhhh.sss",
+  "ssshhhhhhhhhhsss",
+  ".rrhsssssssshrr.",
+  ".rrsskssssksssr.",
+  ".rrsssssssssssr.",
+  ".rrrsskkkkkssrr.",
+  "..rrrsssssssrr..",
+  "..rrrrrrrrrrrr..",
+  "...rrrrrrrrrr...",
+  "....rrrrrrrr....",
+  "....rrrrrrrr....",
+  "....rrrrrrrr....",
+  "....rrrrrrrr....",
+  "....nnnnnnnn....",
+  "....nnn..nnn....",
+  "...kkkk..kkkk...",
+};
+
+// Marco, cristal, travesaños y alféizar comunes a los tres estados de ventana
+void drawWindowBase(TFT_eSprite &spr, uint16_t glass) {
+  spr.createSprite(WIN_WIDTH, WIN_HEIGHT);
+  spr.fillSprite(COLOR_FRAME);
+  spr.fillRect(3, 3, WIN_WIDTH - 6, 40, glass);
+  spr.fillRect(0, 45, WIN_WIDTH, 5, COLOR_SILL);
+  spr.drawFastHLine(0, 44, WIN_WIDTH, COLOR_MORTAR);
+}
+
+void drawWindowMullions(TFT_eSprite &spr) {
+  spr.fillRect(19, 3, 2, 40, COLOR_FRAME);
+  spr.fillRect(3, 22, WIN_WIDTH - 6, 2, COLOR_FRAME);
+}
+
+void buildSprites() {
+  // Felix se dibuja sobre el edificio: fondo magenta = transparente.
+  buildArtSprite(sprFelix, ART_FELIX, 12, 2, TFT_MAGENTA);
+  buildArtSprite(sprFelixFix, ART_FELIX_FIX, 12, 2, TFT_MAGENTA);
+  // Ralph solo se dibuja sobre el cielo: sprite opaco, se pinta sin borrar antes.
+  buildArtSprite(sprRalph, ART_RALPH, 16, 2, COLOR_SKY);
+  buildArtSprite(sprRalphThrow, ART_RALPH_THROW, 16, 2, COLOR_SKY);
 
   sprRock.createSprite(ROCK_SIZE, ROCK_SIZE);
   sprRock.fillSprite(TFT_MAGENTA);
-  sprRock.fillCircle(6, 6, 6, TFT_DARKGREY);
-  sprRock.drawCircle(6, 6, 4, TFT_LIGHTGREY);
+  sprRock.fillCircle(6, 6, 5, TFT_DARKGREY);
+  sprRock.fillRect(2, 3, 8, 6, TFT_DARKGREY);
+  sprRock.fillRect(3, 2, 4, 2, TFT_LIGHTGREY);
+  sprRock.drawLine(5, 6, 8, 9, TFT_BLACK);
+  sprRock.drawPixel(4, 8, TFT_BLACK);
 
-  sprWinFixed.createSprite(WIN_WIDTH, WIN_HEIGHT);
-  sprWinFixed.fillSprite(TFT_CYAN);
-  sprWinFixed.drawRect(0, 0, WIN_WIDTH, WIN_HEIGHT, TFT_NAVY);
-  sprWinFixed.fillRect(18, 0, 4, WIN_HEIGHT, TFT_NAVY);
+  // Ventana intacta: cristal con reflejos
+  drawWindowBase(sprWinFixed, COLOR_GLASS);
+  sprWinFixed.drawLine(6, 16, 15, 7, COLOR_GLASS_SHINE);
+  sprWinFixed.drawLine(6, 20, 17, 9, COLOR_GLASS_SHINE);
+  sprWinFixed.drawLine(24, 40, 33, 31, COLOR_GLASS_SHINE);
+  drawWindowMullions(sprWinFixed);
 
-  sprWinBroken.createSprite(WIN_WIDTH, WIN_HEIGHT);
-  sprWinBroken.fillSprite(TFT_DARKCYAN);
-  sprWinBroken.drawRect(0, 0, WIN_WIDTH, WIN_HEIGHT, TFT_NAVY);
-  sprWinBroken.drawLine(0, 10, 20, 30, TFT_BLACK);
-  sprWinBroken.drawLine(20, 30, 40, 20, TFT_BLACK);
-  sprWinBroken.drawLine(20, 30, 15, 50, TFT_BLACK);
+  // Ventana rota: grietas y un hueco
+  drawWindowBase(sprWinBroken, COLOR_GLASS);
+  sprWinBroken.fillTriangle(22, 4, 36, 4, 30, 18, COLOR_ROOM);
+  sprWinBroken.drawLine(30, 18, 24, 30, TFT_BLACK);
+  sprWinBroken.drawLine(24, 30, 34, 40, TFT_BLACK);
+  sprWinBroken.drawLine(4, 10, 16, 20, TFT_BLACK);
+  sprWinBroken.drawLine(16, 20, 8, 38, TFT_BLACK);
+  sprWinBroken.drawLine(16, 20, 24, 30, TFT_BLACK);
+  drawWindowMullions(sprWinBroken);
 
-  sprWinFullyBroken.createSprite(WIN_WIDTH, WIN_HEIGHT);
-  sprWinFullyBroken.fillSprite(TFT_DARKCYAN);
-  sprWinFullyBroken.drawRect(0, 0, WIN_WIDTH, WIN_HEIGHT, TFT_NAVY);
-  sprWinFullyBroken.drawLine(0, 10, 20, 30, TFT_BLACK);
-  sprWinFullyBroken.drawLine(20, 30, 40, 20, TFT_BLACK);
-  sprWinFullyBroken.drawLine(20, 30, 15, 50, TFT_BLACK);
-  sprWinFullyBroken.drawLine(5, 5, 25, 15, TFT_BLACK);
-  sprWinFullyBroken.drawLine(35, 45, 20, 35, TFT_BLACK);
-  sprWinFullyBroken.drawLine(10, 45, 30, 10, TFT_BLACK);
-  sprWinFullyBroken.fillRect(18, 23, 5, 5, TFT_BLACK);
+  // Ventana muy rota: sin travesaños, solo quedan esquirlas en las esquinas
+  drawWindowBase(sprWinFullyBroken, COLOR_ROOM);
+  sprWinFullyBroken.fillTriangle(3, 3, 16, 3, 3, 18, COLOR_GLASS);
+  sprWinFullyBroken.fillTriangle(36, 3, 36, 14, 26, 3, COLOR_GLASS);
+  sprWinFullyBroken.fillTriangle(3, 42, 3, 30, 12, 42, COLOR_GLASS);
+  sprWinFullyBroken.fillTriangle(36, 42, 36, 26, 22, 42, COLOR_GLASS);
+  sprWinFullyBroken.fillRect(19, 3, 2, 9, COLOR_FRAME);
+  sprWinFullyBroken.fillRect(19, 36, 2, 7, COLOR_FRAME);
 
   sprHammer.createSprite(HAMMER_SIZE, HAMMER_SIZE);
   sprHammer.fillSprite(TFT_MAGENTA);
-  sprHammer.fillRect(2, 4, 12, 5, TFT_YELLOW);
-  sprHammer.fillRect(7, 9, 2, 7, TFT_WHITE);
+  sprHammer.fillRect(1, 2, 14, 6, TFT_BLACK);
+  sprHammer.fillRect(2, 3, 12, 4, TFT_YELLOW);
+  sprHammer.fillRect(6, 8, 4, 8, TFT_BLACK);
+  sprHammer.fillRect(7, 8, 2, 7, TFT_WHITE);
 
-  if (sprColumn.createSprite(WIN_WIDTH, BUILD_H) == nullptr) {
-    Serial.println("Sin memoria para el bufer de columna");
+  if (sprColumn.createSprite(WIN_WIDTH, BUILD_H) == nullptr ||
+      sprActor.createSprite(ACTOR_BUF_W, ACTOR_BUF_H) == nullptr) {
+    Serial.println("Sin memoria para los buferes de composicion");
   }
 }
 
@@ -362,6 +521,11 @@ void giveHammer() {
 
 void resetActors() {
   felix.col = 1; felix.row = 3;
+  felix.px = colX[felix.col]; felix.py = rowY[felix.row];
+  felix.hopping = false;
+  felixDrawnX = felix.px; felixDrawnY = felix.py;
+  felixFixing = false;
+  ralphThrowing = false;
   ralph.col = 1; ralph.oldCol = 1; ralph.moved = true;
   ralph.delayActive = false;
 
@@ -423,7 +587,7 @@ void initGame() {
 
 void enterPlaying() {
   currentState = PLAYING;
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COLOR_SKY);
   drawBuildingBase();
   updateOLED();
   noteStartMillis = millis();
@@ -477,6 +641,8 @@ void handleFelixInput(const Inputs &in, bool fixPressed, unsigned long now) {
       lastFixTime = now;
       felix.score += (w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL;
       markDirty(felix.col);
+      felixFixing = true;
+      felixFixUntil = now + TIME_FIX_ANIM;
       playSFX(NOTE_G4, 150);
       if (allWindowsFixed()) beginStageClear();
       return;
@@ -494,14 +660,17 @@ void handleFelixInput(const Inputs &in, bool fixPressed, unsigned long now) {
 
   if (newCol == felix.col && newRow == felix.row) return;
 
-  markDirty(felix.col);
   felix.col = newCol;
   felix.row = newRow;
-  markDirty(felix.col);
+  felix.fromX = felix.px;
+  felix.fromY = felix.py;
+  felix.hopStart = now;
+  felix.hopping = true;
   lastMoveTime = now;
 
   if (hammerSpawned && felix.col == hammerCol && felix.row == hammerRow) {
     giveHammer();
+    markDirty(hammerCol);
     playSFX(NOTE_C5, 400);
   }
 }
@@ -513,6 +682,9 @@ void spawnRock() {
       rocks[i].col = ralph.col;
       rocks[i].y = BUILD_Y;
       markDirty(ralph.col);
+      ralphThrowing = true;
+      ralphThrowUntil = millis() + TIME_RALPH_THROW;
+      ralph.moved = true;
       break;
     }
   }
@@ -601,20 +773,38 @@ void checkCollisions() {
 }
 
 void updateTimedEffects(unsigned long now) {
+  // Salto de Felix hacia su celda, con un pequeño arco
+  if (felix.hopping) {
+    float t = (float)(now - felix.hopStart) / TIME_HOP;
+    if (t >= 1.0f) { t = 1.0f; felix.hopping = false; }
+    felix.px = felix.fromX + (int)((colX[felix.col] - felix.fromX) * t);
+    felix.py = felix.fromY + (int)((rowY[felix.row] - felix.fromY) * t) - (int)(HOP_HEIGHT * sinf(PI * t));
+  }
+
+  if (felixFixing && now >= felixFixUntil) {
+    felixFixing = false;
+    felixDirty = true;
+  }
+
+  if (ralphThrowing && now >= ralphThrowUntil) {
+    ralphThrowing = false;
+    ralph.moved = true;
+  }
+
   if (felixHasHammer && now >= hammerEndTime) {
     felixHasHammer = false;
-    markDirty(felix.col);
+    felixDirty = true;
   }
 
   if (!isInvincible) return;
   if (now >= invincibilityEndTime) {
     isInvincible = false;
     flickerVisible = true;
-    markDirty(felix.col);
+    felixDirty = true;
   } else if (now - lastFlickerTime > TIME_FLICKER) {
     flickerVisible = !flickerVisible;
     lastFlickerTime = now;
-    markDirty(felix.col);
+    felixDirty = true;
   }
 }
 
@@ -625,56 +815,132 @@ void updateLivesLEDs() {
 }
 
 // ================= RENDERIZADO TFT =================
-// Compone una columna completa (pared, ventanas, martillo, Felix, rocas) en el
-// búfer y la vuelca a la pantalla. Coordenadas locales: origen en la esquina
-// superior izquierda de la columna.
-void renderColumn(int c) {
-  sprColumn.fillSprite(TFT_BROWN);
+// Dibuja en `g` el trozo de pared de ladrillo que cae en la zona de pantalla
+// (x0, y0, w, h). El origen de `g` coincide con la esquina de esa zona.
+void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h) {
+  g.fillRect(0, 0, w, h, COLOR_BRICK);
 
-  for (int r = 0; r < ROWS; r++) {
-    int y = rowY[r] - WIN_OFFSET_Y - BUILD_Y;
-    TFT_eSprite &win = (building[c][r].state == 2) ? sprWinFullyBroken
-                     : (building[c][r].state == 1) ? sprWinBroken
-                     : sprWinFixed;
-    win.pushToSprite(&sprColumn, 0, y);
+  int firstCourse = (y0 - BUILD_Y) / BRICK_H;
+  for (int course = firstCourse; BUILD_Y + course * BRICK_H < y0 + h; course++) {
+    int y = BUILD_Y + course * BRICK_H - y0;  // Junta horizontal de esta hilada
+    g.drawFastHLine(0, y, w, COLOR_MORTAR);
 
-    if (hammerSpawned && hammerCol == c && hammerRow == r) {
-      sprHammer.pushToSprite(&sprColumn, 12, y + 17, TFT_MAGENTA);
+    int stagger = (course % 2) ? BRICK_W / 2 : 0;
+    int firstJoint = (x0 - BUILD_X - stagger) / BRICK_W;
+    for (int j = firstJoint; ; j++) {
+      int x = BUILD_X + stagger + j * BRICK_W - x0;
+      if (x >= w) break;
+      if (x >= 0) g.drawFastVLine(x, y + 1, BRICK_H - 1, COLOR_MORTAR);
+    }
+  }
+}
+
+// Compone en `buf` todo lo que hay en la zona de pantalla que empieza en
+// (x0, y0) y mide lo que el búfer (pared, ventanas, martillo, Felix, rocas) y
+// la vuelca. La zona debe quedar dentro del edificio.
+void renderRegion(TFT_eSprite &buf, int x0, int y0) {
+  int w = buf.width();
+  int h = buf.height();
+  drawBricks(buf, x0, y0, w, h);
+
+  for (int c = 0; c < COLS; c++) {
+    int wx = colX[c] - WIN_OFFSET_X - x0;
+    if (wx >= w || wx + WIN_WIDTH <= 0) continue;
+    for (int r = 0; r < ROWS; r++) {
+      int wy = rowY[r] - WIN_OFFSET_Y - y0;
+      if (wy >= h || wy + WIN_HEIGHT <= 0) continue;
+
+      TFT_eSprite &win = (building[c][r].state == 2) ? sprWinFullyBroken
+                       : (building[c][r].state == 1) ? sprWinBroken
+                       : sprWinFixed;
+      win.pushToSprite(&buf, wx, wy);
+
+      if (hammerSpawned && hammerCol == c && hammerRow == r) {
+        sprHammer.pushToSprite(&buf, wx + 12, wy + 14, TFT_MAGENTA);
+      }
     }
   }
 
-  if (felix.col == c && flickerVisible) {
-    int fy = rowY[felix.row] - BUILD_Y;
-    sprFelix.pushToSprite(&sprColumn, WIN_OFFSET_X - FELIX_OFFSET, fy - FELIX_OFFSET, TFT_MAGENTA);
-    if (felixHasHammer) sprColumn.fillRect(WIN_OFFSET_X - 4, fy - 22, 8, 4, TFT_YELLOW);
+  if (flickerVisible) {
+    int fx = felix.px - x0;
+    int fy = felix.py - y0;
+    TFT_eSprite &frame = felixFixing ? sprFelixFix : sprFelix;
+    frame.pushToSprite(&buf, fx - FELIX_OFFSET, fy - FELIX_OFFSET, TFT_MAGENTA);
+    if (felixHasHammer) buf.fillRect(fx - 4, fy - 22, 8, 4, TFT_YELLOW);
   }
 
   for (int i = 0; i < MAX_ROCKS; i++) {
-    if (rocks[i].active && rocks[i].col == c) {
-      sprRock.pushToSprite(&sprColumn, WIN_OFFSET_X - ROCK_OFFSET, (int)rocks[i].y - ROCK_OFFSET - BUILD_Y, TFT_MAGENTA);
-    }
+    if (!rocks[i].active) continue;
+    sprRock.pushToSprite(&buf, colX[rocks[i].col] - ROCK_OFFSET - x0, (int)rocks[i].y - ROCK_OFFSET - y0, TFT_MAGENTA);
   }
 
-  sprColumn.pushSprite(colX[c] - WIN_OFFSET_X, BUILD_Y);
+  buf.pushSprite(x0, y0);
+}
+
+void renderColumn(int c) {
+  renderRegion(sprColumn, colX[c] - WIN_OFFSET_X, BUILD_Y);
   colDirty[c] = false;
 }
 
+// Recompone una caja del tamaño de sprActor que contiene el punto (x, y)
+// dado como esquina superior izquierda, sin salirse del edificio.
+void renderActorBox(int x, int y) {
+  x = constrain(x, BUILD_X, BUILD_X + BUILD_W - ACTOR_BUF_W);
+  y = constrain(y, BUILD_Y, SCREEN_MAX_Y - ACTOR_BUF_H);
+  renderRegion(sprActor, x, y);
+}
+
+// Repinta a Felix: una sola caja si su posición anterior y la nueva caben
+// juntas (lo normal), o dos si se ha movido mucho entre fotogramas.
+void renderFelixArea() {
+  int minX = min(felixDrawnX, felix.px) - FELIX_OFFSET;
+  int maxX = max(felixDrawnX, felix.px) + FELIX_OFFSET;
+  int minY = min(felixDrawnY, felix.py) - FELIX_RECT_TOP;
+  int maxY = max(felixDrawnY, felix.py) + FELIX_OFFSET;
+
+  if (maxX - minX <= ACTOR_BUF_W && maxY - minY <= ACTOR_BUF_H) {
+    renderActorBox(minX, minY);
+  } else {
+    renderActorBox(felixDrawnX - FELIX_OFFSET, felixDrawnY - FELIX_RECT_TOP);
+    renderActorBox(felix.px - FELIX_OFFSET, felix.py - FELIX_RECT_TOP);
+  }
+
+  felixDrawnX = felix.px;
+  felixDrawnY = felix.py;
+  felixDirty = false;
+}
+
+void drawRalph() {
+  if (ralph.oldCol != ralph.col) {
+    tft.fillRect(colX[ralph.oldCol] - RALPH_OFFSET, RALPH_FIXED_Y, RALPH_SIZE, RALPH_SIZE, COLOR_SKY);
+    ralph.oldCol = ralph.col;
+  }
+  TFT_eSprite &frame = ralphThrowing ? sprRalphThrow : sprRalph;
+  frame.pushSprite(colX[ralph.col] - RALPH_OFFSET, RALPH_FIXED_Y);
+  ralph.moved = false;
+}
+
 void drawBuildingBase() {
-  tft.fillRect(BUILD_X, BUILD_Y, BUILD_W, BUILD_H, TFT_BROWN);
+  // Pared entera una vez (incluye los tramos entre columnas, que luego no se tocan)
+  tft.setViewport(BUILD_X, BUILD_Y, BUILD_W, BUILD_H);
+  drawBricks(tft, BUILD_X, BUILD_Y, BUILD_W, BUILD_H);
+  tft.resetViewport();
+
   for (int c = 0; c < COLS; c++) renderColumn(c);
+  felixDrawnX = felix.px;
+  felixDrawnY = felix.py;
+  felixDirty = false;
   ralph.moved = true;
 }
 
 void drawGame() {
-  if (ralph.moved) {
-    tft.fillRect(colX[ralph.oldCol] - RALPH_OFFSET, RALPH_FIXED_Y, RALPH_SIZE, RALPH_SIZE, TFT_BLACK);
-    sprRalph.pushSprite(colX[ralph.col] - RALPH_OFFSET, RALPH_FIXED_Y, TFT_MAGENTA);
-    ralph.moved = false;
-  }
+  if (ralph.moved) drawRalph();
 
   for (int c = 0; c < COLS; c++) {
     if (colDirty[c]) renderColumn(c);
   }
+
+  if (felixDirty || felix.px != felixDrawnX || felix.py != felixDrawnY) renderFelixArea();
 }
 
 void drawStartScreen() {
