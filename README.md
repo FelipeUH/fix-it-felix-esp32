@@ -205,11 +205,21 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 | BTN_RIGHT (GPIO 14) | Mover Ralph a la derecha |
 | BTN_FIX (GPIO 12) | Lanzar roca |
 
+### Pausa
+
+| Versión | Cómo pausar y reanudar |
+|---|---|
+| RF | **Izquierda + Derecha** a la vez |
+| Bluetooth, 1 jugador | **Start** en el gamepad, o Izquierda + Derecha en la placa |
+| Bluetooth, 2 jugadores | **Start** en el gamepad, o **Abajo** en la placa |
+
+Con la partida en pausa, FIX también la reanuda. Los tiempos en curso (martillo, objetos, invencibilidad…) se congelan y siguen donde estaban.
+
 ---
 
 ## Funcionamiento del juego
 
-1. **Pantalla de inicio**: muestra el título, el récord máximo y la selección de modo (1 o 2 jugadores). Usar Arriba/Abajo para cambiar y FIX/B para confirmar.
+1. **Pantalla de inicio**: muestra el título, el récord del modo resaltado y tres opciones: 1 jugador, 2 jugadores y **Récords** (las 5 mejores puntuaciones de cada modo). Usar Arriba/Abajo para cambiar y FIX/B para confirmar.
 2. **Objetivo**: reparar todas las ventanas rotas del edificio antes de que Ralph te golpee con sus rocas.
 3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX (mantenerlo pulsado no repite). Cada reparación tarda 0,25 s, durante los que Felix no puede moverse; si recibe un golpe, la reparación se pierde. Cada etapa empieza con al menos 3 ventanas rotas.
 4. **Ralph**: en modo 1 jugador tiene IA; en modo 2 jugadores es controlado por una persona. Camina de columna en columna y, antes de cada lanzamiento, levanta los brazos durante 0,35 s: la roca cae cuando los baja. Las rocas caen verticalmente.
@@ -223,7 +233,7 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 8. **Etapas**: al reparar todas las ventanas, se avanza de etapa. Cada etapa aumenta la velocidad de las rocas y la probabilidad de ventanas rotas, y acorta el tiempo entre lanzamientos de Ralph (de 2 s hasta un mínimo de 0,9 s).
 9. **Pájaro**: desde la etapa 3, cada 5–9 s un pájaro cruza una fila entera del edificio (un pitido agudo lo anuncia). Golpea a Felix si está en esa fila cuando pasa por su columna.
 10. **Combo**: cada reparación seguida sin recibir un golpe sube el multiplicador de puntos (x2, x3… hasta x5). Un golpe lo devuelve a x1.
-11. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa (por el multiplicador de combo), 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
+11. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa (por el multiplicador de combo), 500 pts de bono por etapa. Al terminar la partida, si la puntuación entra entre las 5 mejores de su modo, se piden tres iniciales (Arriba/Abajo cambian la letra, Izquierda/Derecha la casilla, FIX guarda). Las tablas de 1 y 2 jugadores se guardan por separado en la memoria no volátil (Preferences).
 
 ### Sonido, LEDs y vibración
 

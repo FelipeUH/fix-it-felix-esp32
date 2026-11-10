@@ -14,6 +14,7 @@
 struct Inputs {
   bool up, down, left, right, fix;         // Felix y navegación de menús
   bool ralphLeft, ralphRight, ralphThrow;  // Ralph controlado por una persona
+  bool pause;                              // Pausar / reanudar la partida
 };
 
 void platformSetup();                 // Inicializa el control inalámbrico
@@ -140,11 +141,24 @@ const int HINT_Y = 280;
 const int HINT_H = 26;
 const int MENU_OPTION_X = 30;
 const int MENU_OPTION_W = 180;
-const int MENU_OPTION_H = 30;
-const int MENU_OPTION_1_Y = 146;
-const int MENU_OPTION_2_Y = 184;
+const int MENU_OPTION_H = 26;
+const int MENU_OPTION_Y = 140;      // Primera opción
+const int MENU_OPTION_PITCH = 30;
+const int MENU_OPTIONS = 3;         // 1 jugador, 2 jugadores, récords
 const int MENU_RECORD_Y = 127;
 const unsigned long TIME_HINT_BLINK = 500;
+
+// Tabla de mejores puntuaciones (una por modo) e introducción del nombre
+const int TOP_COUNT = 5;
+const int NAME_LEN = 3;
+const char NAME_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ-";
+const int NAME_CHAR_COUNT = sizeof(NAME_CHARS) - 1;
+const int NAME_SLOT_W = 44;
+const int NAME_SLOT_H = 56;
+const int NAME_SLOT_Y = 104;
+const int NAME_SLOT_PITCH = 56;
+const int NAME_SLOT_X = (SCREEN_W - (NAME_LEN - 1) * NAME_SLOT_PITCH - NAME_SLOT_W) / 2;
+const int SCORE_TABLE_H = 112;
 const unsigned long TIME_LED_BLINK = 600;
 const unsigned long TIME_LED_SWEEP = 120;
 const unsigned long TIME_POPUP = 600;       // Lo que dura el "+100" sobre la ventana
@@ -272,11 +286,12 @@ TFT_eSprite sprActor = TFT_eSprite(&tft);   // Entorno de Felix (saltos entre ve
 TFT_eSprite sprBirdBuf = TFT_eSprite(&tft); // Entorno del pájaro
 
 // ================= ESTRUCTURAS Y MODOS =================
-enum GameState { START, PLAYING, STAGE_CLEAR, GAMEOVER };
+enum GameState { START, SCORES, PLAYING, PAUSED, STAGE_CLEAR, ENTER_NAME, GAMEOVER };
 enum GameMode { ONE_PLAYER, TWO_PLAYERS };
 
 GameState currentState = START;
-GameMode selectedMode = ONE_PLAYER;
+GameMode selectedMode = ONE_PLAYER;  // Modo resaltado en el menú y en la pantalla de récords
+int menuIndex = 0;                   // Opción del menú: 0 y 1 son los modos, 2 los récords
 GameMode activeMode = ONE_PLAYER;
 
 struct Window { int state; };  // 0 intacta, 1 rota, 2 muy rota
@@ -335,7 +350,19 @@ bool ralphThrowing = false;
 unsigned long ralphThrowUntil = 0;
 
 int stage = 1;
-long highScore[2] = {0, 0};  // Récord por modo, indexado por GameMode
+struct ScoreEntry {
+  char name[NAME_LEN + 1];
+  int32_t score;
+};
+ScoreEntry topScores[2][TOP_COUNT];  // Por modo (GameMode), de mayor a menor
+const char* const TOP_KEYS[2] = {"top1p", "top2p"};
+int lastRank = -1;                   // Puesto logrado en la última partida (-1 = fuera de la tabla)
+
+char entryName[NAME_LEN + 1] = "AAA";  // Se recuerda de una partida a otra
+int entrySlot = 0;
+unsigned long nameEntryStart = 0;
+unsigned long pauseStart = 0;
+bool prevPause = false;
 const char* const HIGHSCORE_KEYS[2] = {"highscore", "highscore2p"};
 
 bool isInvincible = false;
@@ -363,7 +390,6 @@ bool birdOnScreen = false;
 unsigned long ledBlinkUntil = 0;
 
 bool startScreenDrawn = false;
-bool newRecordThisGame = false;
 bool hintVisible = true;
 unsigned long lastHintToggle = 0;
 bool prevFix = false;
@@ -380,6 +406,8 @@ unsigned long gameOverStart = 0;
 void updateLivesLEDs();
 void updateOLED();
 void drawStartScreen();
+void drawNameEntryScreen();
+void drawPauseOverlay();
 void drawMenuOptions();
 void drawStageClearScreen();
 void showGameOverScreen();
@@ -674,18 +702,42 @@ void buildSprites() {
 }
 
 // ================= PUNTUACIÓN =================
+long bestScore(GameMode mode) { return topScores[mode][0].score; }
+
 void loadHighScores() {
   preferences.begin("felix_game", true);
-  for (int m = 0; m < 2; m++) highScore[m] = preferences.getLong(HIGHSCORE_KEYS[m], 0);
+  for (int m = 0; m < 2; m++) {
+    if (preferences.getBytesLength(TOP_KEYS[m]) == sizeof(topScores[m])) {
+      preferences.getBytes(TOP_KEYS[m], topScores[m], sizeof(topScores[m]));
+      continue;
+    }
+    // Sin tabla guardada: vacía, conservando el récord único de versiones anteriores
+    for (int i = 0; i < TOP_COUNT; i++) {
+      strcpy(topScores[m][i].name, "---");
+      topScores[m][i].score = 0;
+    }
+    topScores[m][0].score = preferences.getLong(HIGHSCORE_KEYS[m], 0);
+  }
   preferences.end();
 }
 
-void saveHighScoreIfBeaten() {
-  if (felix.score <= highScore[activeMode]) return;
-  highScore[activeMode] = felix.score;
-  newRecordThisGame = true;
+// Puesto que ocuparía esta puntuación, o -1 si no entra en la tabla
+int rankForScore(GameMode mode, long score) {
+  if (score <= 0) return -1;
+  for (int i = 0; i < TOP_COUNT; i++) {
+    if (score > topScores[mode][i].score) return i;
+  }
+  return -1;
+}
+
+void insertScore(GameMode mode, int rank, const char *name, long score) {
+  for (int i = TOP_COUNT - 1; i > rank; i--) topScores[mode][i] = topScores[mode][i - 1];
+  strncpy(topScores[mode][rank].name, name, NAME_LEN);
+  topScores[mode][rank].name[NAME_LEN] = '\0';
+  topScores[mode][rank].score = score;
+
   preferences.begin("felix_game", false);
-  preferences.putLong(HIGHSCORE_KEYS[activeMode], felix.score);
+  preferences.putBytes(TOP_KEYS[mode], topScores[mode], sizeof(topScores[mode]));
   preferences.end();
 }
 
@@ -813,7 +865,6 @@ void initGame() {
   felix.score = 0;
   felixHasShield = false;
   combo = 0;
-  newRecordThisGame = false;
   resetActors();
   generateStage();
   updateLivesLEDs();
@@ -838,7 +889,6 @@ bool allWindowsFixed() {
 void beginStageClear() {
   stage++;
   felix.score += SCORE_STAGE_BONUS;
-  saveHighScoreIfBeaten();
 
   drawStageClearScreen();
   updateOLED();
@@ -848,13 +898,55 @@ void beginStageClear() {
 }
 
 void beginGameOver() {
-  currentState = GAMEOVER;
-  saveHighScoreIfBeaten();
   PLAY(SFX_GAME_OVER);
   platformRumble(600);
-  showGameOverScreen();
+
+  // Si la puntuación entra en la tabla, primero se pide el nombre
+  lastRank = rankForScore(activeMode, felix.score);
+  if (lastRank >= 0) {
+    currentState = ENTER_NAME;
+    entrySlot = 0;
+    nameEntryStart = millis();
+    drawNameEntryScreen();
+  } else {
+    currentState = GAMEOVER;
+    gameOverStart = millis();
+    showGameOverScreen();
+  }
   updateMenuOLED();
-  gameOverStart = millis();
+}
+
+// Al reanudar, todos los plazos pendientes se retrasan lo que duró la pausa
+void resumeFromPause(unsigned long now) {
+  unsigned long delta = now - pauseStart;
+  ralph.lastThrowTime += delta;
+  ralph.nextMoveTime += delta;
+  ralphThrowUntil += delta;
+  felixFixUntil += delta;
+  felix.hopStart += delta;
+  invincibilityEndTime += delta;
+  lastFlickerTime += delta;
+  hammerEndTime += delta;
+  slowEndTime += delta;
+  pickup.expires += delta;
+  nextPickupTime += delta;
+  nextBirdTime += delta;
+  popup.until += delta;
+  ledBlinkUntil += delta;
+  lastMoveTime = now;  // Que el botón de pausa aún pulsado no mueva a Felix
+  lastGameUpdate = now;
+
+  currentState = PLAYING;
+  drawBuildingBase();
+  felixDirty = true;
+  startMusic();
+}
+
+void beginPause(unsigned long now) {
+  currentState = PAUSED;
+  pauseStart = now;
+  drawPauseOverlay();
+  updateMenuOLED();
 }
 
 int comboMultiplier() { return min(combo + 1, COMBO_MAX_MULT); }
@@ -1125,7 +1217,7 @@ void updateLivesLEDs() {
     bool on = felix.lives > i;
     if (currentState == STAGE_CLEAR) {
       on = (int)((now / TIME_LED_SWEEP) % 3) == i;
-    } else if (currentState == GAMEOVER) {
+    } else if (currentState == GAMEOVER || currentState == ENTER_NAME) {
       on = (now / 400) % 2 == 0;
     } else if (now < ledBlinkUntil && i == felix.lives) {
       on = (now / 80) % 2 == 0;
@@ -1383,7 +1475,9 @@ void drawPanelRow(const char *label, long value, int y, uint16_t color) {
   tft.drawNumber(value, SCREEN_W - 32, y);
 }
 
-void drawMenuOption(int y, const char *label, bool selected) {
+void drawMenuOption(int index, const char *label) {
+  bool selected = (index == menuIndex);
+  int y = MENU_OPTION_Y + index * MENU_OPTION_PITCH;
   tft.fillRoundRect(MENU_OPTION_X, y, MENU_OPTION_W, MENU_OPTION_H, 6, selected ? TFT_YELLOW : COLOR_ROOM);
   tft.drawRoundRect(MENU_OPTION_X, y, MENU_OPTION_W, MENU_OPTION_H, 6, selected ? TFT_WHITE : COLOR_STEEL);
   if (selected) {
@@ -1397,14 +1491,16 @@ void drawMenuOption(int y, const char *label, bool selected) {
   tft.drawString(label, MENU_OPTION_X + 30, y + MENU_OPTION_H / 2);
 }
 
-// Parte del menú que cambia al mover la selección: las dos opciones y el
-// récord del modo elegido. No repinta el resto de la pantalla.
+// Parte del menú que cambia al mover la selección: las opciones y el récord
+// del modo resaltado. No repinta el resto de la pantalla.
 void drawMenuOptions() {
-  drawMenuOption(MENU_OPTION_1_Y, "1 JUGADOR", selectedMode == ONE_PLAYER);
-  drawMenuOption(MENU_OPTION_2_Y, "2 JUGADORES", selectedMode == TWO_PLAYERS);
+  drawMenuOption(0, "1 JUGADOR");
+  drawMenuOption(1, "2 JUGADORES");
+  drawMenuOption(2, "RECORDS");
 
   char text[24];
-  snprintf(text, sizeof(text), "RECORD %ld", highScore[selectedMode]);
+  const ScoreEntry &best = topScores[selectedMode][0];
+  snprintf(text, sizeof(text), "RECORD %s %ld", best.name, (long)best.score);
   tft.fillRect(0, MENU_RECORD_Y - 9, SCREEN_W, 18, COLOR_SKY);
   tft.setTextFont(1);
   tft.setTextSize(2);
@@ -1430,6 +1526,103 @@ void drawStartScreen() {
   drawPressFixHint(true);
 }
 
+// Tabla de un modo dentro de un panel que empieza en `y`. `highlight` es el
+// puesto a resaltar (-1 = ninguno).
+void drawScoreTable(GameMode mode, int y, int highlight) {
+  drawPanel(y, SCORE_TABLE_H);
+  tft.setTextFont(1);
+  tft.setTextSize(2);
+
+  for (int i = 0; i < TOP_COUNT; i++) {
+    const ScoreEntry &entry = topScores[mode][i];
+    int lineY = y + 10 + i * 19;
+    tft.setTextColor(i == highlight ? TFT_YELLOW : (entry.score > 0 ? TFT_WHITE : COLOR_STEEL));
+    tft.setTextDatum(TL_DATUM);
+    tft.drawNumber(i + 1, 32, lineY);
+    tft.drawString(entry.name, 58, lineY);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawNumber(entry.score, SCREEN_W - 32, lineY);
+  }
+}
+
+// Pantalla de récords del menú: lo que cambia al pasar de un modo a otro
+void drawScoresContent() {
+  tft.fillRect(0, 60, SCREEN_W, 24, COLOR_SKY);
+  drawShadowText(selectedMode == ONE_PLAYER ? "< 1 JUGADOR >" : "< 2 JUGADORES >", SCREEN_W / 2, 72, 2, TFT_WHITE, COLOR_DENIM_DARK);
+  drawScoreTable(selectedMode, 92, -1);
+  updateMenuOLED();
+}
+
+void drawScoresScreen() {
+  drawBackdrop();
+  drawShadowText("RECORDS", SCREEN_W / 2, 34, 4, TFT_YELLOW, COLOR_SHIRT);
+  drawScoresContent();
+
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_GLASS_SHINE);
+  tft.drawString("ARRIBA/ABAJO: CAMBIAR DE MODO", SCREEN_W / 2, 222);
+
+  sprFelix.pushSprite((SCREEN_W - FELIX_SIZE) / 2, MENU_WALL_Y - FELIX_SIZE, TFT_MAGENTA);
+  drawHintPlaque();
+  drawPressFixHint(true);
+}
+
+// Una casilla de letra de la pantalla de nombre
+void drawNameSlot(int slot) {
+  bool selected = (slot == entrySlot);
+  int x = NAME_SLOT_X + slot * NAME_SLOT_PITCH;
+  int cx = x + NAME_SLOT_W / 2;
+  int bottom = NAME_SLOT_Y + NAME_SLOT_H;
+
+  // Flechas arriba y abajo solo en la casilla activa
+  uint16_t arrow = selected ? TFT_YELLOW : COLOR_SKY;
+  tft.fillTriangle(cx - 8, NAME_SLOT_Y - 6, cx + 8, NAME_SLOT_Y - 6, cx, NAME_SLOT_Y - 14, arrow);
+  tft.fillTriangle(cx - 8, bottom + 6, cx + 8, bottom + 6, cx, bottom + 14, arrow);
+
+  tft.fillRoundRect(x, NAME_SLOT_Y, NAME_SLOT_W, NAME_SLOT_H, 6, COLOR_ROOM);
+  tft.drawRoundRect(x, NAME_SLOT_Y, NAME_SLOT_W, NAME_SLOT_H, 6, selected ? TFT_YELLOW : COLOR_STEEL);
+
+  char letter[2] = {entryName[slot], '\0'};
+  tft.setTextFont(1);
+  tft.setTextSize(5);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(selected ? TFT_YELLOW : TFT_WHITE);
+  tft.drawString(letter, cx + 2, NAME_SLOT_Y + NAME_SLOT_H / 2);
+}
+
+void drawNameEntryScreen() {
+  drawBackdrop();
+
+  drawShadowText(lastRank == 0 ? "NUEVO RECORD!" : "ENTRAS EN EL TOP!", SCREEN_W / 2, 30, 2, TFT_YELLOW, COLOR_SHIRT);
+
+  char text[24];
+  snprintf(text, sizeof(text), "PUESTO %d: %ld", lastRank + 1, felix.score);
+  drawShadowText(text, SCREEN_W / 2, 58, 2, TFT_WHITE, COLOR_DENIM_DARK);
+
+  for (int i = 0; i < NAME_LEN; i++) drawNameSlot(i);
+
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_GLASS_SHINE);
+  tft.drawString("ARRIBA/ABAJO: LETRA", SCREEN_W / 2, 196);
+  tft.drawString("IZQUIERDA/DERECHA: CASILLA", SCREEN_W / 2, 210);
+
+  sprFelixFix.pushSprite((SCREEN_W - FELIX_SIZE) / 2, MENU_WALL_Y - FELIX_SIZE, TFT_MAGENTA);
+  drawHintPlaque();
+  drawHintText("FIX: GUARDAR", true);
+}
+
+// Cartel de pausa sobre el edificio; al reanudar se repinta el edificio entero
+void drawPauseOverlay() {
+  tft.fillRoundRect(36, 124, SCREEN_W - 72, 72, 8, COLOR_ROOM);
+  tft.drawRoundRect(36, 124, SCREEN_W - 72, 72, 8, TFT_YELLOW);
+  drawShadowText("PAUSA", SCREEN_W / 2, 150, 4, TFT_YELLOW, COLOR_SHIRT);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString("PAUSA O FIX PARA SEGUIR", SCREEN_W / 2, 180);
+}
+
 void drawStageClearScreen() {
   drawBackdrop();
 
@@ -1452,20 +1645,17 @@ void drawStageClearScreen() {
 void showGameOverScreen() {
   drawBackdrop();
 
-  drawShadowText("GAME OVER", SCREEN_W / 2, 40, 4, TFT_WHITE, COLOR_SHIRT);
+  drawShadowText("GAME OVER", SCREEN_W / 2, 24, 3, TFT_WHITE, COLOR_SHIRT);
   if (activeMode == TWO_PLAYERS) {
-    drawShadowText("GANA RALPH!", SCREEN_W / 2, 78, 2, TFT_YELLOW, COLOR_SHIRT);
+    drawShadowText("GANA RALPH!", SCREEN_W / 2, 48, 1, TFT_YELLOW, COLOR_SHIRT);
   }
 
-  drawPanel(98, 124);
-  drawPanelRow("PUNTOS", felix.score, 112, TFT_WHITE);
-  drawPanelRow("ETAPA", stage, 142, TFT_WHITE);
-  drawPanelRow("RECORD", highScore[activeMode], 172, COLOR_GLASS_SHINE);
-  if (newRecordThisGame) {
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_YELLOW);
-    tft.drawString("NUEVO RECORD!", SCREEN_W / 2, 206);
-  }
+  drawPanel(58, 48);
+  drawPanelRow("PUNTOS", felix.score, 66, TFT_WHITE);
+  drawPanelRow("ETAPA", stage, 86, TFT_WHITE);
+
+  // Tabla del modo jugado, con el puesto recién logrado resaltado
+  drawScoreTable(activeMode, 112, lastRank);
 
   // Ralph celebra sobre el muro
   sprRalphThrow.pushSprite((SCREEN_W - RALPH_SIZE) / 2, MENU_WALL_Y - RALPH_SIZE);
@@ -1474,7 +1664,6 @@ void showGameOverScreen() {
   drawPressFixHint(true);
 }
 
-// ================= RENDERIZADO OLED =================
 // Panel de juego (128x32):
 //   arriba:  puntos en grande | corazones de vida y etapa
 //   abajo:   radar de rocas | ventanas rotas que quedan | barra de Ralph o martillo
@@ -1574,26 +1763,39 @@ void updateMenuOLED() {
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setTextColor(WHITE);
-  if (currentState == GAMEOVER) {
+
+  if (currentState == PAUSED) {
+    oled.setTextSize(2);
+    oled.setCursor(34, 0);
+    oled.print("PAUSA");
+    oled.setTextSize(1);
+    oled.setCursor(0, 22);
+    oled.print("Pts:"); oled.print(felix.score);
+    oled.print("  Etapa:"); oled.print(stage);
+  } else if (currentState == GAMEOVER || currentState == ENTER_NAME) {
     oled.setTextSize(2);
     oled.setCursor(10, 0);
     oled.print("GAME OVER");
     oled.setTextSize(1);
     oled.setCursor(0, 22);
     oled.print("Pts:"); oled.print(felix.score);
-    oled.print("  Etapa:"); oled.print(stage);
+    if (lastRank >= 0) { oled.print("  Puesto:"); oled.print(lastRank + 1); }
+    else { oled.print("  Etapa:"); oled.print(stage); }
   } else {
-    oled.setTextColor(WHITE);
     oled.setCursor(28, 0);
     oled.print("FIX-IT FELIX");
-    // Modo elegido en una barra invertida
+    // Opción elegida en una barra invertida
     oled.fillRect(0, 10, OLED_WIDTH, 11, WHITE);
     oled.setTextColor(BLACK);
     oled.setCursor(4, 12);
-    oled.print(selectedMode == ONE_PLAYER ? "1 JUGADOR" : "2 JUGADORES");
+    if (currentState == START && menuIndex == 2) oled.print("RECORDS");
+    else oled.print(selectedMode == ONE_PLAYER ? "1 JUGADOR" : "2 JUGADORES");
     oled.setTextColor(WHITE);
     oled.setCursor(0, 24);
-    oled.print("Record: "); oled.print(highScore[selectedMode]);
+    oled.print("Record: ");
+    oled.print(topScores[selectedMode][0].name);
+    oled.print(" ");
+    oled.print(bestScore(selectedMode));
   }
   oled.display();
 }
@@ -1632,14 +1834,48 @@ void gameSetup() {
   buildSprites();
 }
 
+// Pantalla de nombre: arriba/abajo cambian la letra, izquierda/derecha la casilla
+void handleNameEntry(const Inputs &in, bool fixPressed, unsigned long now) {
+  if (fixPressed && now - nameEntryStart >= TIME_GAMEOVER_LOCK) {
+    insertScore(activeMode, lastRank, entryName, felix.score);
+    playSFX(NOTE_C5, 200);
+    currentState = GAMEOVER;
+    gameOverStart = now;
+    showGameOverScreen();
+    updateMenuOLED();
+    return;
+  }
+
+  if (now - menuDebounceTime <= TIME_DEBOUNCE) return;
+
+  if (in.up || in.down) {
+    int index = strchr(NAME_CHARS, entryName[entrySlot]) - NAME_CHARS;
+    index = (index + (in.up ? 1 : NAME_CHAR_COUNT - 1)) % NAME_CHAR_COUNT;
+    entryName[entrySlot] = NAME_CHARS[index];
+    drawNameSlot(entrySlot);
+  } else if (in.left || in.right) {
+    int previous = entrySlot;
+    entrySlot = (entrySlot + (in.right ? 1 : NAME_LEN - 1)) % NAME_LEN;
+    drawNameSlot(previous);
+    drawNameSlot(entrySlot);
+  } else {
+    return;
+  }
+  menuDebounceTime = now;
+  playSFX(NOTE_E4, 30);
+}
+
 void gameLoop() {
   platformPoll();
 
   unsigned long now = millis();
   Inputs in = {};
-  readInputs(in, currentState == PLAYING && activeMode == TWO_PLAYERS);
+  bool inMatch = (currentState == PLAYING || currentState == PAUSED);
+  readInputs(in, inMatch && activeMode == TWO_PLAYERS);
   bool fixPressed = in.fix && !prevFix;
   prevFix = in.fix;
+  bool pausePressed = in.pause && !prevPause;
+  prevPause = in.pause;
 
   handleAudio(now);
   updateLivesLEDs();
@@ -1654,10 +1890,16 @@ void gameLoop() {
       if (now - menuDebounceTime <= TIME_MENU_DEBOUNCE) break;
 
       if (in.up || in.down) {
-        selectedMode = (selectedMode == ONE_PLAYER) ? TWO_PLAYERS : ONE_PLAYER;
+        menuIndex = (menuIndex + (in.down ? 1 : MENU_OPTIONS - 1)) % MENU_OPTIONS;
+        if (menuIndex < 2) selectedMode = (menuIndex == 0) ? ONE_PLAYER : TWO_PLAYERS;
         drawMenuOptions();
         menuDebounceTime = now;
         playSFX(NOTE_E4, 50);
+      } else if (fixPressed && menuIndex == 2) {
+        playSFX(NOTE_C5, 80);
+        currentState = SCORES;
+        drawScoresScreen();
+        menuDebounceTime = now;
       } else if (fixPressed) {
         PLAY(SFX_START);
         activeMode = selectedMode;
@@ -1666,7 +1908,27 @@ void gameLoop() {
       }
       break;
 
+    case SCORES:
+      updateHintBlink(now);
+      if (fixPressed) {
+        playSFX(NOTE_C5, 80);
+        currentState = START;
+        startScreenDrawn = false;
+        menuDebounceTime = now;
+      } else if ((in.up || in.down || in.left || in.right) && now - menuDebounceTime > TIME_MENU_DEBOUNCE) {
+        selectedMode = (selectedMode == ONE_PLAYER) ? TWO_PLAYERS : ONE_PLAYER;
+        drawScoresContent();
+        menuDebounceTime = now;
+        playSFX(NOTE_E4, 50);
+      }
+      break;
+
     case PLAYING:
+      if (pausePressed) {
+        beginPause(now);
+        break;
+      }
+
       handleFelixInput(in, fixPressed, now);
       if (currentState != PLAYING) break;
 
@@ -1689,12 +1951,20 @@ void gameLoop() {
       }
       break;
 
+    case PAUSED:
+      if (pausePressed || fixPressed) resumeFromPause(now);
+      break;
+
     case STAGE_CLEAR:
       if (now - stageClearStart >= TIME_STAGE_SCREEN) {
         resetActors();
         generateStage();
         enterPlaying();
       }
+      break;
+
+    case ENTER_NAME:
+      handleNameEntry(in, fixPressed, now);
       break;
 
     case GAMEOVER:

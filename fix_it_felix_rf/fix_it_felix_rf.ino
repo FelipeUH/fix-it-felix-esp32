@@ -1,5 +1,6 @@
 // Fix-it Felix! - versión RF (433 MHz)
 // Felix: pulsadores de la placa. Ralph (2 jugadores): mando RF de 3 botones.
+// Pausa: Izquierda + Derecha a la vez.
 // La lógica del juego está en felix_game.h (enlace a ../shared/felix_game.h), común con la versión Bluetooth.
 #include <SPI.h>
 #include <TFT_eSPI.h>
@@ -38,6 +39,7 @@ void readInputs(Inputs &in, bool ralphIsHuman) {
   in.left = digitalRead(BTN_LEFT) == LOW;
   in.right = digitalRead(BTN_RIGHT) == LOW;
   in.fix = digitalRead(BTN_FIX) == LOW;
+  in.pause = in.left && in.right;  // Izquierda + Derecha a la vez
 
   // Los códigos recibidos fuera del modo 2 jugadores se descartan
   if (rfSwitch.available()) {

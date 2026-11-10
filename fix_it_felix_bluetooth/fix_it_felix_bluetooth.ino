@@ -1,6 +1,7 @@
 // Fix-it Felix! - versión Bluetooth (Bluepad32)
 // 1 jugador: Felix con gamepad o con los pulsadores de la placa.
 // 2 jugadores: Felix con gamepad, Ralph con los pulsadores.
+// Pausa: Start en el gamepad; en la placa, Izquierda + Derecha (1 jugador) o Abajo (2 jugadores).
 // La lógica del juego está en felix_game.h (enlace a ../shared/felix_game.h), común con la versión RF.
 #include <SPI.h>
 #include <TFT_eSPI.h>
@@ -20,6 +21,7 @@ bool padDown = false;
 bool padLeft = false;
 bool padRight = false;
 bool padA = false;
+bool padStart = false;
 
 // ================= GESTIÓN DE CONTROLES BLUEPAD32 =================
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
@@ -47,7 +49,7 @@ void onDisconnectedController(ControllerPtr ctl) {
 }
 
 void readGamepadInputs() {
-  padUp = padDown = padLeft = padRight = padA = false;
+  padUp = padDown = padLeft = padRight = padA = padStart = false;
   for (auto ctl : myControllers) {
     if (ctl && ctl->isConnected() && ctl->isGamepad()) {
       padUp = (ctl->dpad() & DPAD_UP) || (ctl->axisY() < -STICK_THRESHOLD);
@@ -55,6 +57,7 @@ void readGamepadInputs() {
       padLeft = (ctl->dpad() & DPAD_LEFT) || (ctl->axisX() < -STICK_THRESHOLD);
       padRight = (ctl->dpad() & DPAD_RIGHT) || (ctl->axisX() > STICK_THRESHOLD);
       padA = ctl->a();
+      padStart = ctl->miscStart();
       break;
     }
   }
@@ -102,12 +105,14 @@ void readInputs(Inputs &in, bool ralphIsHuman) {
   in.left = padLeft;
   in.right = padRight;
   in.fix = padA;
+  in.pause = padStart;
 
   if (ralphIsHuman) {
     // 2 jugadores: los pulsadores son de Ralph
     in.ralphLeft = btnUp;
     in.ralphRight = btnRight;
     in.ralphThrow = btnFix;
+    in.pause |= btnDown;  // Abajo no tiene otro uso para Ralph
   } else {
     // Menús y 1 jugador: los pulsadores también manejan a Felix
     in.up |= btnUp;
@@ -115,6 +120,7 @@ void readInputs(Inputs &in, bool ralphIsHuman) {
     in.left |= btnLeft;
     in.right |= btnRight;
     in.fix |= btnFix;
+    in.pause |= btnLeft && btnRight;  // Izquierda + Derecha a la vez
   }
 }
 
