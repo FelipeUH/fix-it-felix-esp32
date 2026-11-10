@@ -50,7 +50,7 @@ const int RALPH_OFFSET = 16;
 const int ROCK_SIZE = 12;
 const int ROCK_OFFSET = 6;
 const int HAMMER_SIZE = 16;
-const int MAX_ROCKS = 3;
+const int MAX_ROCKS = 5;
 
 const int WIN_WIDTH = 40;
 const int WIN_HEIGHT = 50;
@@ -66,12 +66,13 @@ const int RALPH_FIXED_Y = BUILD_Y - RALPH_SIZE;  // Ralph de pie sobre la azotea
 const unsigned long TICK_GAME = 30;
 const unsigned long TICK_OLED = 200;
 const unsigned long TIME_DEBOUNCE = 150;        // Repetición de movimiento al mantener
-const unsigned long TIME_FIX_COOLDOWN = 120;    // Mínimo entre dos reparaciones
 const unsigned long TIME_MENU_DEBOUNCE = 200;
 const unsigned long TIME_STAGE_SCREEN = 2600;   // Duración de la pantalla "ETAPA N"
 const unsigned long TIME_GAMEOVER_LOCK = 800;   // Evita saltarse el Game Over sin querer
 
-const unsigned long TIME_COOLDOWN_RALPH = 2000;
+const unsigned long TIME_COOLDOWN_RALPH = 2000;       // Entre lanzamientos en la etapa 1
+const unsigned long TIME_COOLDOWN_RALPH_STEP = 150;   // Se acorta esto en cada etapa
+const unsigned long TIME_COOLDOWN_RALPH_MIN = 900;
 const unsigned long TIME_COOLDOWN_START = 1000;
 const unsigned long TIME_POWERUP_HAMMER = 4000;
 const unsigned long TIME_INVINCIBLE = 1500;
@@ -79,8 +80,8 @@ const unsigned long TIME_FLICKER = 100;
 
 const unsigned long TIME_HOP = 120;          // Duración del salto de Felix entre ventanas
 const int HOP_HEIGHT = 6;                    // Altura del arco del salto (px)
-const unsigned long TIME_FIX_ANIM = 150;     // Felix con el martillo en alto
-const unsigned long TIME_RALPH_THROW = 250;  // Ralph con los brazos en alto
+const unsigned long TIME_REPAIR = 250;       // Lo que tarda una reparación; Felix no puede moverse
+const unsigned long TIME_RALPH_WINDUP = 350; // Ralph levanta los brazos antes de soltar la roca
 
 // Área que se recompone alrededor de Felix (cabe su posición anterior y la nueva)
 const int ACTOR_BUF_W = 48;
@@ -211,7 +212,6 @@ struct PlayerRalph {
   int col, oldCol;
   unsigned long lastThrowTime;
   bool moved;
-  int targetCol;
   unsigned long nextMoveTime;
   bool delayActive;
 };
@@ -225,7 +225,7 @@ struct Rock {
 // ================= VARIABLES DE ESTADO =================
 Window building[COLS][ROWS];
 PlayerFelix felix = {1, 3, 3, 0, 0, 0, 0, 0, 0, false};
-PlayerRalph ralph = {1, 1, 0, true, 1, 0, false};
+PlayerRalph ralph = {1, 1, 0, true, 0, false};
 Rock rocks[MAX_ROCKS];
 bool colDirty[COLS];
 bool felixDirty = false;
@@ -257,7 +257,6 @@ unsigned long lastGameUpdate = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long menuDebounceTime = 0;
 unsigned long lastMoveTime = 0;
-unsigned long lastFixTime = 0;
 unsigned long lastRalphMoveTime = 0;
 unsigned long stageClearStart = 0;
 unsigned long gameOverStart = 0;
@@ -269,6 +268,7 @@ void drawStartScreen();
 void showGameOverScreen();
 void drawBuildingBase();
 void renderColumn(int c);
+void updateInvincibility(unsigned long now);
 void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h);
 
 // ================= GESTIÓN DE AUDIO =================
@@ -513,6 +513,13 @@ void saveHighScoreIfBeaten() {
 // ================= LÓGICA DEL JUEGO =================
 void markDirty(int c) { colDirty[c] = true; }
 
+// Tiempo entre lanzamientos de Ralph: se acorta con cada etapa
+unsigned long ralphCooldown() {
+  unsigned long reduction = (unsigned long)(stage - 1) * TIME_COOLDOWN_RALPH_STEP;
+  if (reduction >= TIME_COOLDOWN_RALPH - TIME_COOLDOWN_RALPH_MIN) return TIME_COOLDOWN_RALPH_MIN;
+  return TIME_COOLDOWN_RALPH - reduction;
+}
+
 void giveHammer() {
   hammerSpawned = false;
   felixHasHammer = true;
@@ -530,7 +537,7 @@ void resetActors() {
   ralph.delayActive = false;
 
   // El primer lanzamiento llega tras TIME_COOLDOWN_START en vez del cooldown completo
-  unsigned long initialOffset = TIME_COOLDOWN_RALPH - TIME_COOLDOWN_START;
+  unsigned long initialOffset = ralphCooldown() - TIME_COOLDOWN_START;
   ralph.lastThrowTime = (millis() >= initialOffset) ? millis() - initialOffset : 0;
 
   for (int i = 0; i < MAX_ROCKS; i++) rocks[i].active = false;
@@ -632,21 +639,31 @@ void beginGameOver() {
   currentState = GAMEOVER;
 }
 
+// Termina la reparación en curso: aquí es cuando la ventana mejora de verdad
+void finishRepair() {
+  felixFixing = false;
+  felixDirty = true;
+
+  Window &w = building[felix.col][felix.row];
+  if (w.state == 0) return;
+  w.state--;
+  felix.score += (w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL;
+  markDirty(felix.col);
+  playSFX(NOTE_G4, 150);
+  if (allWindowsFixed()) beginStageClear();
+}
+
 void handleFelixInput(const Inputs &in, bool fixPressed, unsigned long now) {
-  // Reparar: una reparación por pulsación (flanco), no por mantener el botón
-  if (fixPressed && now - lastFixTime >= TIME_FIX_COOLDOWN) {
-    Window &w = building[felix.col][felix.row];
-    if (w.state > 0) {
-      w.state--;
-      lastFixTime = now;
-      felix.score += (w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL;
-      markDirty(felix.col);
-      felixFixing = true;
-      felixFixUntil = now + TIME_FIX_ANIM;
-      playSFX(NOTE_G4, 150);
-      if (allWindowsFixed()) beginStageClear();
-      return;
-    }
+  // Mientras repara, Felix se queda quieto (y expuesto a las rocas)
+  if (felixFixing) return;
+
+  // Una reparación por pulsación (flanco), no por mantener el botón
+  if (fixPressed && building[felix.col][felix.row].state > 0) {
+    felixFixing = true;
+    felixFixUntil = now + TIME_REPAIR;
+    felixDirty = true;
+    playSFX(NOTE_E4, 60);
+    return;
   }
 
   if (now - lastMoveTime < TIME_DEBOUNCE) return;
@@ -682,9 +699,6 @@ void spawnRock() {
       rocks[i].col = ralph.col;
       rocks[i].y = BUILD_Y;
       markDirty(ralph.col);
-      ralphThrowing = true;
-      ralphThrowUntil = millis() + TIME_RALPH_THROW;
-      ralph.moved = true;
       break;
     }
   }
@@ -696,11 +710,25 @@ void moveRalph(int newCol) {
   ralph.moved = true;
 }
 
+// Ralph levanta los brazos; la roca sale cuando los baja (ver updateTimedEffects).
+// Ese aviso es lo que permite a Felix reaccionar.
+void startThrow(unsigned long now) {
+  ralphThrowing = true;
+  ralphThrowUntil = now + TIME_RALPH_WINDUP;
+  ralph.lastThrowTime = now;
+  ralph.moved = true;
+  playSFX(110, 70);
+}
+
 void handleRalph(const Inputs &in, unsigned long now) {
-  bool cooldownReady = now >= ralph.lastThrowTime && (now - ralph.lastThrowTime >= TIME_COOLDOWN_RALPH);
+  if (ralphThrowing) return;  // Clavado en el sitio mientras prepara el lanzamiento
+
+  bool cooldownReady = now >= ralph.lastThrowTime && (now - ralph.lastThrowTime >= ralphCooldown());
 
   if (activeMode == TWO_PLAYERS) {
-    if (now - lastRalphMoveTime > TIME_DEBOUNCE) {
+    if (in.ralphThrow && cooldownReady) {
+      startThrow(now);
+    } else if (now - lastRalphMoveTime > TIME_DEBOUNCE) {
       if (in.ralphLeft && ralph.col > 0) {
         moveRalph(ralph.col - 1);
         lastRalphMoveTime = now;
@@ -709,31 +737,22 @@ void handleRalph(const Inputs &in, unsigned long now) {
         lastRalphMoveTime = now;
       }
     }
-    if (in.ralphThrow && cooldownReady) {
-      spawnRock();
-      ralph.lastThrowTime = now;
-    }
     return;
   }
 
-  // IA de 1 jugador: persigue la columna de Felix con un retraso de reacción
-  if (felix.col != ralph.col) {
-    if (!ralph.delayActive || ralph.targetCol != felix.col) {
-      ralph.targetCol = felix.col;
-      ralph.nextMoveTime = now + random(IA_DELAY_MIN, IA_DELAY_MAX);
-      ralph.delayActive = true;
-    }
-  }
-
-  if (ralph.delayActive && now >= ralph.nextMoveTime) {
-    if (ralph.targetCol != ralph.col) moveRalph(ralph.targetCol);
+  // IA de 1 jugador: camina hacia la columna de Felix, de una en una y con un
+  // retraso de reacción en cada paso
+  if (felix.col == ralph.col) {
+    ralph.delayActive = false;
+  } else if (!ralph.delayActive) {
+    ralph.nextMoveTime = now + random(IA_DELAY_MIN, IA_DELAY_MAX);
+    ralph.delayActive = true;
+  } else if (now >= ralph.nextMoveTime) {
+    moveRalph(ralph.col + (felix.col > ralph.col ? 1 : -1));
     ralph.delayActive = false;
   }
 
-  if (cooldownReady) {
-    spawnRock();
-    ralph.lastThrowTime = now;
-  }
+  if (cooldownReady) startThrow(now);
 }
 
 void updateRocks() {
@@ -756,6 +775,7 @@ void checkCollisions() {
 
     rocks[i].active = false;
     markDirty(rocks[i].col);
+    felixFixing = false;  // El golpe interrumpe la reparación
     felix.lives--;
     updateLivesLEDs();
 
@@ -781,14 +801,10 @@ void updateTimedEffects(unsigned long now) {
     felix.py = felix.fromY + (int)((rowY[felix.row] - felix.fromY) * t) - (int)(HOP_HEIGHT * sinf(PI * t));
   }
 
-  if (felixFixing && now >= felixFixUntil) {
-    felixFixing = false;
-    felixDirty = true;
-  }
-
   if (ralphThrowing && now >= ralphThrowUntil) {
     ralphThrowing = false;
     ralph.moved = true;
+    spawnRock();
   }
 
   if (felixHasHammer && now >= hammerEndTime) {
@@ -796,7 +812,15 @@ void updateTimedEffects(unsigned long now) {
     felixDirty = true;
   }
 
-  if (!isInvincible) return;
+  if (isInvincible) {
+    updateInvincibility(now);
+  }
+
+  // Al final: puede completar la etapa y cambiar de estado
+  if (felixFixing && now >= felixFixUntil) finishRepair();
+}
+
+void updateInvincibility(unsigned long now) {
   if (now >= invincibilityEndTime) {
     isInvincible = false;
     flickerVisible = true;
@@ -1023,8 +1047,8 @@ void updateOLED() {
 
   unsigned long timeSinceThrow = (now >= ralph.lastThrowTime) ? now - ralph.lastThrowTime : 0;
   int barWidth = OLED_WIDTH;
-  if (timeSinceThrow < TIME_COOLDOWN_RALPH) {
-    barWidth = map(timeSinceThrow, 0, TIME_COOLDOWN_RALPH, 0, OLED_WIDTH);
+  if (timeSinceThrow < ralphCooldown()) {
+    barWidth = map(timeSinceThrow, 0, ralphCooldown(), 0, OLED_WIDTH);
   }
   oled.drawRect(0, 26, OLED_WIDTH, 6, WHITE);
   oled.fillRect(0, 26, barWidth, 6, WHITE);
@@ -1104,6 +1128,7 @@ void gameLoop() {
 
       handleRalph(in, now);
       updateTimedEffects(now);
+      if (currentState != PLAYING) break;
 
       if (now - lastGameUpdate >= TICK_GAME) {
         lastGameUpdate = now;

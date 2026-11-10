@@ -211,12 +211,12 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 
 1. **Pantalla de inicio**: muestra el título, el récord máximo y la selección de modo (1 o 2 jugadores). Usar Arriba/Abajo para cambiar y FIX/B para confirmar.
 2. **Objetivo**: reparar todas las ventanas rotas del edificio antes de que Ralph te golpee con sus rocas.
-3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX (mantenerlo pulsado no repite). Cada etapa empieza con al menos 3 ventanas rotas.
-4. **Ralph**: en modo 1 jugador tiene IA; en modo 2 jugadores es controlado por una persona. Lanza rocas que caen verticalmente.
+3. **Ventanas**: pueden estar en 3 estados: intactas (0), parcialmente rotas (1) y totalmente rotas (2). Felix repara un nivel por cada pulsación de FIX (mantenerlo pulsado no repite). Cada reparación tarda 0,25 s, durante los que Felix no puede moverse; si recibe un golpe, la reparación se pierde. Cada etapa empieza con al menos 3 ventanas rotas.
+4. **Ralph**: en modo 1 jugador tiene IA; en modo 2 jugadores es controlado por una persona. Camina de columna en columna y, antes de cada lanzamiento, levanta los brazos durante 0,35 s: la roca cae cuando los baja. Las rocas caen verticalmente.
 5. **Martillo**: power-up que aparece aleatoriamente. Al recogerlo, Felix es invencible por 4 segundos y puede destruir rocas al instante.
 6. **Invencibilidad**: al recibir un golpe, Felix parpadea durante 1.5 segundos sin poder ser dañado.
 7. **Vidas**: 3 vidas indicadas por LEDs. Al perder todas, Game Over.
-8. **Etapas**: al reparar todas las ventanas, se avanza de etapa. Cada etapa aumenta la velocidad de las rocas y la probabilidad de ventanas rotas.
+8. **Etapas**: al reparar todas las ventanas, se avanza de etapa. Cada etapa aumenta la velocidad de las rocas y la probabilidad de ventanas rotas, y acorta el tiempo entre lanzamientos de Ralph (de 2 s hasta un mínimo de 0,9 s).
 9. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa, 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
 
 ---
