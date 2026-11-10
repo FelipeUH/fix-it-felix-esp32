@@ -82,6 +82,14 @@ void platformPoll() {
 const char* platformBootMessage() { return "ESPERANDO BT..."; }
 const char* platformFixLabel() { return "FIX o B"; }
 
+void platformRumble(int durationMs) {
+  for (auto ctl : myControllers) {
+    if (ctl && ctl->isConnected() && ctl->isGamepad()) {
+      ctl->playDualRumble(0 /* inicio */, durationMs, 0x80 /* motor débil */, 0xFF /* motor fuerte */);
+    }
+  }
+}
+
 void readInputs(Inputs &in, bool ralphIsHuman) {
   bool btnUp = digitalRead(BTN_UP) == LOW;
   bool btnDown = digitalRead(BTN_DOWN) == LOW;

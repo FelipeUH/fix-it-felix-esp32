@@ -225,6 +225,14 @@ El mando emparejado se recuerda entre reinicios. Para borrar los emparejamientos
 10. **Combo**: cada reparación seguida sin recibir un golpe sube el multiplicador de puntos (x2, x3… hasta x5). Un golpe lo devuelve a x1.
 11. **Puntuación**: 50 pts por reparación parcial, 100 pts por reparación completa (por el multiplicador de combo), 500 pts de bono por etapa. El récord se guarda en la memoria no volátil (Preferences), por separado para 1 y 2 jugadores, al superar cada etapa y al terminar la partida.
 
+### Sonido, LEDs y vibración
+
+- **Música**: dos melodías de 32 notas que se alternan cada dos etapas; el tempo sube con cada etapa. Los efectos suenan por encima y la melodía continúa donde iba.
+- **Efectos**: fanfarrias de inicio, etapa superada y Game Over, y sonidos propios para reparar, recoger un objeto, recibir un golpe, el escudo y el pájaro.
+- **LEDs de vida**: el LED de la vida perdida parpadea un momento antes de apagarse, los tres hacen un barrido al superar una etapa y parpadean en Game Over.
+- **Vibración** (solo Bluetooth): el mando vibra al recibir un golpe y en Game Over.
+- **Puntos flotantes**: al reparar, los puntos ganados aparecen un momento sobre la ventana.
+
 ---
 
 ## Información adicional en el OLED

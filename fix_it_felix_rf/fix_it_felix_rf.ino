@@ -30,6 +30,7 @@ void platformPoll() {}
 
 const char* platformBootMessage() { return "INICIANDO..."; }
 const char* platformFixLabel() { return "FIX"; }
+void platformRumble(int durationMs) {}  // El mando RF no vibra
 
 void readInputs(Inputs &in, bool ralphIsHuman) {
   in.up = digitalRead(BTN_UP) == LOW;

@@ -23,6 +23,7 @@ void platformPoll();                  // Se llama una vez por iteración del loo
 void readInputs(Inputs &in, bool ralphIsHuman);
 const char* platformBootMessage();    // Texto del OLED durante el arranque
 const char* platformFixLabel();       // Nombre del botón de acción en pantalla
+void platformRumble(int durationMs);  // Vibración del mando, si lo hay
 
 // ================= PINES =================
 #define PIN_BUZZER 16
@@ -144,6 +145,9 @@ const int MENU_OPTION_1_Y = 146;
 const int MENU_OPTION_2_Y = 184;
 const int MENU_RECORD_Y = 127;
 const unsigned long TIME_HINT_BLINK = 500;
+const unsigned long TIME_LED_BLINK = 600;
+const unsigned long TIME_LED_SWEEP = 120;
+const unsigned long TIME_POPUP = 600;       // Lo que dura el "+100" sobre la ventana
 
 const unsigned long IA_DELAY_MIN = 100;
 const unsigned long IA_DELAY_MAX = 301;
@@ -178,33 +182,69 @@ const int colX[COLS] = {40, 120, 200};
 const int rowY[ROWS] = {90, 160, 230, 300};
 
 // ================= SISTEMA DE AUDIO =================
+// Un solo zumbador: la música de fondo avanza siempre a su ritmo y los efectos
+// la tapan mientras suenan, así al terminar el efecto la melodía sigue en su sitio.
+#define NOTE_G3  196
+#define NOTE_A3  220
 #define NOTE_C4  262
 #define NOTE_D4  294
 #define NOTE_E4  330
 #define NOTE_F4  349
 #define NOTE_G4  392
+#define NOTE_GS4 415
+#define NOTE_A4  440
+#define NOTE_B4  494
 #define NOTE_C5  523
+#define NOTE_D5  587
+#define NOTE_E5  659
+#define NOTE_G5  784
+#define NOTE_A5  880
+#define NOTE_C6  1047
 #define REST     0
 
-const int bgmNotes[] = {NOTE_C4, REST, NOTE_E4, REST, NOTE_G4, REST, NOTE_E4, REST};
-const int bgmDurations[] = {150, 50, 150, 50, 150, 50, 150, 50};
-const int bgmLength = 8;
+struct Note { uint16_t freq; uint16_t ms; };
+#define SEQ_LEN(seq) ((int)(sizeof(seq) / sizeof(seq[0])))
 
-const int jingleStageNotes[] = {NOTE_C4, NOTE_E4, NOTE_G4, NOTE_C5};
-const int jingleStageDurations[] = {120, 120, 120, 300};
-const int jingleStageLength = 4;
+// Música: dos melodías de 32 pasos iguales (una alegre, otra más tensa) que se
+// alternan cada dos etapas. El paso se acorta con la etapa: va cada vez más rápida.
+const int MUSIC_STEPS = 32;
+const uint16_t MUSIC_TRACKS[2][MUSIC_STEPS] = {
+  {NOTE_C5, NOTE_E5, NOTE_G5, NOTE_E5,  NOTE_C5, NOTE_E5, NOTE_G5, NOTE_E5,
+   NOTE_A4, NOTE_C5, NOTE_E5, NOTE_C5,  NOTE_G4, NOTE_B4, NOTE_D5, NOTE_B4,
+   NOTE_F4, NOTE_A4, NOTE_C5, NOTE_A4,  NOTE_G4, NOTE_B4, NOTE_D5, NOTE_G5,
+   NOTE_E5, NOTE_D5, NOTE_C5, NOTE_B4,  NOTE_C5, REST,    NOTE_G4, REST},
+  {NOTE_A4, NOTE_C5, NOTE_E5, NOTE_C5,  NOTE_A4, NOTE_C5, NOTE_E5, NOTE_A5,
+   NOTE_F4, NOTE_A4, NOTE_C5, NOTE_A4,  NOTE_E4, NOTE_GS4, NOTE_B4, NOTE_GS4,
+   NOTE_D4, NOTE_F4, NOTE_A4, NOTE_F4,  NOTE_E4, NOTE_GS4, NOTE_B4, NOTE_E5,
+   NOTE_C5, NOTE_B4, NOTE_A4, NOTE_GS4, NOTE_A4, REST,    NOTE_E4, REST},
+};
+const unsigned long MUSIC_STEP_BASE = 160;  // ms por nota en la etapa 1
+const unsigned long MUSIC_STEP_DEC = 6;     // Se acorta esto por etapa
+const unsigned long MUSIC_STEP_MIN = 100;
+const unsigned long MUSIC_NOTE_GAP = 18;    // Silencio al final de cada nota para separarlas
 
-int currentNote = 0;
-unsigned long noteStartMillis = 0;
-unsigned long sfxEndMillis = 0;
-bool buzzerOn = false;
+// Efectos y fanfarrias
+const Note SFX_START[] = {{NOTE_G4, 80}, {NOTE_C5, 80}, {NOTE_E5, 80}, {NOTE_G5, 160}};
+const Note SFX_STAGE_CLEAR[] = {{NOTE_C5, 100}, {NOTE_E5, 100}, {NOTE_G5, 100}, {NOTE_C6, 180}, {NOTE_G5, 90}, {NOTE_C6, 300}};
+const Note SFX_GAME_OVER[] = {{NOTE_G4, 180}, {NOTE_E4, 180}, {NOTE_C4, 180}, {NOTE_A3, 180}, {NOTE_G3, 450}};
+const Note SFX_PICKUP[] = {{NOTE_E5, 70}, {NOTE_A5, 70}, {NOTE_C6, 140}};
+const Note SFX_HIT[] = {{220, 90}, {160, 90}, {110, 180}};
+const Note SFX_SHIELD[] = {{NOTE_C6, 60}, {NOTE_G5, 60}, {NOTE_C6, 100}};
+const Note SFX_REPAIR[] = {{NOTE_G5, 60}, {NOTE_C6, 90}};
+const Note SFX_BIRD[] = {{1800, 50}, {REST, 30}, {2200, 60}};
 
-// Melodía corta que tiene prioridad sobre la música de fondo
-const int *jingleNotes = nullptr;
-const int *jingleDurations = nullptr;
-int jingleLength = 0;
-int jinglePos = 0;
-unsigned long jingleNoteStart = 0;
+uint16_t buzzerFreq = 0;  // Lo que suena ahora mismo (0 = silencio)
+
+const uint16_t *musicTrack = MUSIC_TRACKS[0];
+unsigned long musicStepMs = MUSIC_STEP_BASE;
+unsigned long musicStepStart = 0;
+int musicPos = 0;
+
+const Note *sfxSeq = nullptr;  // Efecto en curso, o nullptr
+int sfxLength = 0;
+int sfxPos = 0;
+unsigned long sfxNoteStart = 0;
+Note sfxSingle = {0, 0};       // Para efectos de una sola nota (playSFX)
 
 // ================= PANTALLAS Y OBJETOS GLOBALES =================
 TFT_eSPI tft = TFT_eSPI();
@@ -311,10 +351,16 @@ bool felixHasShield = false;
 unsigned long slowEndTime = 0;
 int combo = 0;  // Reparaciones seguidas sin recibir un golpe
 
+// Puntos ganados que se muestran un momento sobre la ventana reparada
+struct ScorePopup { bool active; int col, row; long value; unsigned long until; };
+ScorePopup popup = {false, 0, 0, 0, 0};
+
 Bird bird = {false, 0, 0, 1};
 unsigned long nextBirdTime = 0;
 int birdDrawnX = 0;
 bool birdOnScreen = false;
+
+unsigned long ledBlinkUntil = 0;
 
 bool startScreenDrawn = false;
 bool newRecordThisGame = false;
@@ -346,60 +392,56 @@ int birdY();
 void drawBricks(TFT_eSPI &g, int x0, int y0, int w, int h);
 
 // ================= GESTIÓN DE AUDIO =================
-void buzz(int freq) {
-  if (freq == REST) {
-    if (buzzerOn) noTone(PIN_BUZZER);
-    buzzerOn = false;
-  } else {
-    tone(PIN_BUZZER, freq);
-    buzzerOn = true;
-  }
+void buzz(uint16_t freq) {
+  if (freq == buzzerFreq) return;
+  if (freq == REST) noTone(PIN_BUZZER);
+  else tone(PIN_BUZZER, freq);
+  buzzerFreq = freq;
 }
+
+void playSequence(const Note *seq, int length) {
+  sfxSeq = seq;
+  sfxLength = length;
+  sfxPos = 0;
+  sfxNoteStart = millis();
+}
+#define PLAY(seq) playSequence(seq, SEQ_LEN(seq))
 
 void playSFX(int freq, int duration) {
-  buzz(freq);
-  sfxEndMillis = millis() + duration;
+  sfxSingle = {(uint16_t)freq, (uint16_t)duration};
+  playSequence(&sfxSingle, 1);
 }
 
-void playJingle(const int *notes, const int *durations, int length) {
-  jingleNotes = notes;
-  jingleDurations = durations;
-  jingleLength = length;
-  jinglePos = 0;
-  jingleNoteStart = millis();
-  sfxEndMillis = 0;
-  buzz(notes[0]);
+// Arranca la música de la etapa actual desde el principio
+void startMusic() {
+  musicTrack = MUSIC_TRACKS[((stage - 1) / 2) % 2];
+  unsigned long faster = (unsigned long)(stage - 1) * MUSIC_STEP_DEC;
+  musicStepMs = (faster >= MUSIC_STEP_BASE - MUSIC_STEP_MIN) ? MUSIC_STEP_MIN : MUSIC_STEP_BASE - faster;
+  musicPos = 0;
+  musicStepStart = millis();
 }
 
 void handleAudio(unsigned long now) {
-  if (jingleNotes != nullptr) {
-    if (now - jingleNoteStart >= (unsigned long)jingleDurations[jinglePos]) {
-      jinglePos++;
-      if (jinglePos >= jingleLength) {
-        jingleNotes = nullptr;
-        buzz(REST);
-      } else {
-        jingleNoteStart = now;
-        buzz(jingleNotes[jinglePos]);
-      }
+  if (sfxSeq != nullptr && now - sfxNoteStart >= sfxSeq[sfxPos].ms) {
+    sfxPos++;
+    sfxNoteStart = now;
+    if (sfxPos >= sfxLength) sfxSeq = nullptr;
+  }
+
+  uint16_t want = REST;
+
+  if (currentState == PLAYING) {
+    if (now - musicStepStart > 1000) musicStepStart = now;  // Tras un parón largo no se "pone al día"
+    while (now - musicStepStart >= musicStepMs) {
+      musicStepStart += musicStepMs;
+      musicPos = (musicPos + 1) % MUSIC_STEPS;
     }
-    return;
+    if (now - musicStepStart < musicStepMs - MUSIC_NOTE_GAP) want = musicTrack[musicPos];
   }
 
-  if (now < sfxEndMillis) return;
+  if (sfxSeq != nullptr) want = sfxSeq[sfxPos].freq;
 
-  if (currentState != PLAYING) {
-    buzz(REST);
-    currentNote = 0;
-    return;
-  }
-
-  if (now - noteStartMillis >= (unsigned long)bgmDurations[currentNote]) {
-    currentNote++;
-    if (currentNote >= bgmLength) currentNote = 0;
-    noteStartMillis = now;
-    buzz(bgmNotes[currentNote]);
-  }
+  buzz(want);
 }
 
 // ================= INICIALIZACIÓN DE SPRITES =================
@@ -700,7 +742,7 @@ void collectPickup(unsigned long now) {
   markDirty(pickup.col);
   felixDirty = true;
   schedulePickup(now);
-  playSFX(NOTE_C5, 400);
+  PLAY(SFX_PICKUP);
 }
 
 bool slowActive(unsigned long now) { return now < slowEndTime; }
@@ -729,6 +771,7 @@ void resetActors() {
 
   pickup.type = PICKUP_NONE;
   schedulePickup(millis());
+  popup.active = false;
   bird.active = false;
   birdOnScreen = false;
   nextBirdTime = millis() + random(TIME_BIRD_MIN, TIME_BIRD_MAX);
@@ -781,7 +824,7 @@ void enterPlaying() {
   tft.fillScreen(COLOR_SKY);
   drawBuildingBase();
   updateOLED();
-  noteStartMillis = millis();
+  startMusic();
   lastGameUpdate = millis();
 }
 
@@ -799,7 +842,7 @@ void beginStageClear() {
 
   drawStageClearScreen();
   updateOLED();
-  playJingle(jingleStageNotes, jingleStageDurations, jingleStageLength);
+  PLAY(SFX_STAGE_CLEAR);
   stageClearStart = millis();
   currentState = STAGE_CLEAR;
 }
@@ -807,7 +850,8 @@ void beginStageClear() {
 void beginGameOver() {
   currentState = GAMEOVER;
   saveHighScoreIfBeaten();
-  playSFX(150, 1000);
+  PLAY(SFX_GAME_OVER);
+  platformRumble(600);
   showGameOverScreen();
   updateMenuOLED();
   gameOverStart = millis();
@@ -823,10 +867,12 @@ void finishRepair() {
   Window &w = building[felix.col][felix.row];
   if (w.state == 0) return;
   w.state--;
-  felix.score += ((w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL) * comboMultiplier();
+  long gained = ((w.state == 0) ? SCORE_FIX_FULL : SCORE_FIX_PARTIAL) * comboMultiplier();
+  felix.score += gained;
   combo++;
+  popup = {true, felix.col, felix.row, gained, millis() + TIME_POPUP};
   markDirty(felix.col);
-  playSFX(NOTE_G4, 150);
+  PLAY(SFX_REPAIR);
   if (allWindowsFixed()) beginStageClear();
 }
 
@@ -951,7 +997,7 @@ void updateBird(unsigned long now) {
     bird.row = random(ROWS);
     bird.dir = random(2) ? 1 : -1;
     bird.x = (bird.dir > 0) ? BUILD_X - BIRD_W / 2 : BUILD_X + BUILD_W + BIRD_W / 2;
-    playSFX(1800, 60);
+    PLAY(SFX_BIRD);
     return;
   }
 
@@ -974,16 +1020,18 @@ void hitFelix() {
 
   if (felixHasShield) {
     felixHasShield = false;  // El escudo absorbe el golpe: ni vida ni combo
-    playSFX(NOTE_C5, 120);
+    PLAY(SFX_SHIELD);
+    platformRumble(100);
   } else {
     combo = 0;
     felix.lives--;
-    updateLivesLEDs();
+    ledBlinkUntil = millis() + TIME_LED_BLINK;  // Parpadea el LED de la vida perdida
     if (felix.lives <= 0) {
       beginGameOver();
       return;
     }
-    playSFX(200, 300);
+    PLAY(SFX_HIT);
+    platformRumble(250);
   }
 
   isInvincible = true;
@@ -1030,6 +1078,11 @@ void updateTimedEffects(unsigned long now) {
     felixDirty = true;
   }
 
+  if (popup.active && now >= popup.until) {
+    popup.active = false;
+    markDirty(popup.col);
+  }
+
   // Objetos: caducan si nadie los recoge y reaparecen cada cierto tiempo
   if (pickup.type != PICKUP_NONE) {
     if (now >= pickup.expires) {
@@ -1061,10 +1114,24 @@ void updateInvincibility(unsigned long now) {
   }
 }
 
+// LEDs de vida: muestran las vidas, con tres animaciones encima:
+// parpadeo de la vida recién perdida, barrido al superar una etapa y
+// parpadeo lento de los tres en Game Over.
 void updateLivesLEDs() {
-  digitalWrite(LED_LIFE_1, felix.lives >= 1 ? HIGH : LOW);
-  digitalWrite(LED_LIFE_2, felix.lives >= 2 ? HIGH : LOW);
-  digitalWrite(LED_LIFE_3, felix.lives >= 3 ? HIGH : LOW);
+  static const int pins[3] = {LED_LIFE_1, LED_LIFE_2, LED_LIFE_3};
+  unsigned long now = millis();
+
+  for (int i = 0; i < 3; i++) {
+    bool on = felix.lives > i;
+    if (currentState == STAGE_CLEAR) {
+      on = (int)((now / TIME_LED_SWEEP) % 3) == i;
+    } else if (currentState == GAMEOVER) {
+      on = (now / 400) % 2 == 0;
+    } else if (now < ledBlinkUntil && i == felix.lives) {
+      on = (now / 80) % 2 == 0;
+    }
+    digitalWrite(pins[i], on ? HIGH : LOW);
+  }
 }
 
 // ================= RENDERIZADO TFT =================
@@ -1135,6 +1202,21 @@ void renderRegion(TFT_eSprite &buf, int x0, int y0) {
   for (int i = 0; i < MAX_ROCKS; i++) {
     if (!rocks[i].active) continue;
     sprRock.pushToSprite(&buf, colX[rocks[i].col] - ROCK_OFFSET - x0, (int)rocks[i].y - ROCK_OFFSET - y0, TFT_MAGENTA);
+  }
+
+  if (popup.active) {
+    // Sobre los ladrillos, justo encima de la ventana, con sombra para que se lea
+    char text[8];
+    snprintf(text, sizeof(text), "+%ld", popup.value);
+    int tx = colX[popup.col] - x0;
+    int ty = rowY[popup.row] - WIN_OFFSET_Y - 6 - y0;
+    buf.setTextFont(1);
+    buf.setTextSize(1);
+    buf.setTextDatum(MC_DATUM);
+    buf.setTextColor(TFT_BLACK);
+    buf.drawString(text, tx + 1, ty + 1);
+    buf.setTextColor(TFT_YELLOW);
+    buf.drawString(text, tx, ty);
   }
 
   if (bird.active) {
@@ -1560,6 +1642,7 @@ void gameLoop() {
   prevFix = in.fix;
 
   handleAudio(now);
+  updateLivesLEDs();
 
   switch (currentState) {
     case START:
@@ -1576,7 +1659,7 @@ void gameLoop() {
         menuDebounceTime = now;
         playSFX(NOTE_E4, 50);
       } else if (fixPressed) {
-        playSFX(NOTE_C5, 200);
+        PLAY(SFX_START);
         activeMode = selectedMode;
         initGame();
         enterPlaying();
@@ -1617,6 +1700,7 @@ void gameLoop() {
     case GAMEOVER:
       updateHintBlink(now);
       if (fixPressed && now - gameOverStart >= TIME_GAMEOVER_LOCK) {
+        felix.lives = 3;  // En el menú los tres LEDs vuelven a estar encendidos
         playSFX(NOTE_C5, 200);
         currentState = START;
         startScreenDrawn = false;
